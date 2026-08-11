@@ -1,0 +1,5 @@
+{
+  "_comment": "Copy to config.json and fill in the paths for THIS machine. Forward slashes work on Windows too.",
+  "drive_root": "H:/My Drive",
+  "claude_bin": ""
+}

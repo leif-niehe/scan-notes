@@ -1,0 +1,8 @@
+# Per-machine paths. Never commit this.
+config.json
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.DS_Store
