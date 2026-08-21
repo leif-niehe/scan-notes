@@ -2,8 +2,11 @@
 """Turn scanned handwritten notes into Markdown files.
 
 Manual trigger: run it when you're at a machine that syncs Drive.
-Reads  <drive_root>/Scanned_*.jpg
+Reads  <drive_root>/Scanned_*.{jpg,png,heic,pdf}
 Writes <drive_root>/02_Areas/Personal/Reflection AI automated/
+
+A single image is one page. A PDF is a stack of pages that may hold several
+reflections; each reflection becomes its own note.
 """
 
 from __future__ import annotations
@@ -31,10 +34,17 @@ MANIFEST_NAME = "_manifest.json"
 
 SCAN_RE = re.compile(r"^Scanned_(\d{8})-(\d{4})", re.IGNORECASE)
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".heic", ".heif"}
+PDF_EXTS = {".pdf"}
+SOURCE_EXTS = IMAGE_EXTS | PDF_EXTS
 
 # An extracted page date this much older than the scan is treated as a misread.
 MAX_BACKDATE_DAYS = 5 * 365
 CALL_TIMEOUT_S = 300
+
+# PDF pages are rasterised to this long edge. The model downsamples below this
+# anyway; the headroom is for re-transcribing against a better model later.
+PDF_LONG_EDGE_PX = 2200
+PDF_JPEG_QUALITY = 88
 
 CLAUDE_FALLBACKS = [
     Path.home() / ".local" / "bin" / "claude.exe",
@@ -173,16 +183,22 @@ def slugify(raw: str, max_words: int = 6) -> str:
     return "-".join(words) or "untitled"
 
 
-def claim_names(out_dir: Path, date: dt.date, slug: str, img_ext: str) -> tuple[Path, Path]:
-    """Find a free (md, image) filename pair, adding -2, -3 on collision."""
-    stem = f"{date.isoformat()}_{slug}"
+def image_names_for(stem: str, count: int) -> list[str]:
+    """First page keeps the bare stem; later pages of the same note get _p2, _p3."""
+    return [f"{stem}.jpg" if i == 0 else f"{stem}_p{i + 1}.jpg" for i in range(count)]
+
+
+def claim_names(out_dir: Path, date: dt.date, slug: str,
+                image_count: int) -> tuple[Path, list[Path]]:
+    """Find a free (md, images) filename set, adding -2, -3 on collision."""
+    base = f"{date.isoformat()}_{slug}"
     n = 1
     while True:
-        suffix = "" if n == 1 else f"-{n}"
-        md = out_dir / f"{stem}{suffix}.md"
-        img = out_dir / f"{stem}{suffix}{img_ext}"
-        if not md.exists() and not img.exists():
-            return md, img
+        stem = base if n == 1 else f"{base}-{n}"
+        md = out_dir / f"{stem}.md"
+        imgs = [out_dir / name for name in image_names_for(stem, image_count)]
+        if not md.exists() and not any(p.exists() for p in imgs):
+            return md, imgs
         n += 1
 
 
@@ -225,27 +241,94 @@ def save_manifest(out_dir: Path, new_entries: dict) -> None:
 
 
 ORIGINAL_RE = re.compile(r"^original:\s*(.+?)\s*$", re.MULTILINE)
+PAGES_RE = re.compile(r"^pages:\s*(\d+)(?:\s*-\s*(\d+))?\s+of\s+(\d+)\s*$", re.MULTILINE)
 
 
-def originals_already_written(out_dir: Path) -> set[str]:
-    """Source filenames recorded in notes that already exist.
+def pages_from_manifest(manifest: dict, key: str) -> set[int]:
+    """Pages the run log says are done, so a note you deleted on purpose stays
+    deleted instead of coming back on the next run. Entries written before
+    multi-page sources existed record a single page."""
+    entry = manifest.get(key)
+    if not entry:
+        return set()
+    return set(entry.get("pages_done") or [1])
+
+
+def pages_already_written(out_dir: Path) -> dict[str, set[int]]:
+    """Source filename -> page numbers already turned into notes.
 
     The output folder, not the manifest, is the authoritative answer to "has
-    this been processed". It cannot be lost to a Drive sync conflict.
+    this been processed". It cannot be lost to a Drive sync conflict. Notes
+    from a multi-page source carry a `pages:` line, so a run cut short by
+    --limit resumes at the first page no note covers.
     """
-    seen: set[str] = set()
+    seen: dict[str, set[int]] = {}
     for md in out_dir.glob("*.md"):
         try:
-            m = ORIGINAL_RE.search(md.read_text(encoding="utf-8"))
+            text = md.read_text(encoding="utf-8")
         except OSError:
             continue
-        if m:
-            seen.add(m.group(1))
+        m = ORIGINAL_RE.search(text)
+        if not m:
+            continue
+        covered = seen.setdefault(m.group(1), set())
+        p = PAGES_RE.search(text)
+        if p:
+            first = int(p.group(1))
+            last = int(p.group(2) or p.group(1))
+            covered.update(range(first, last + 1))
+        else:
+            covered.add(1)
     return seen
 
 
+DATE_ON_PAGE_RE = re.compile(r"^date_on_page:\s*(\S+)\s*$", re.MULTILINE)
+
+
+def iso_to_date(iso: str) -> dt.date | None:
+    """"YYYY-MM-DD", or "YYYY-MM" as the first of that month. None otherwise."""
+    try:
+        if re.fullmatch(r"\d{4}-\d{2}", iso):
+            return dt.date(int(iso[:4]), int(iso[5:7]), 1)
+        return dt.date.fromisoformat(iso)
+    except ValueError:
+        return None
+
+
+def carry_seed(out_dir: Path, original: str) -> tuple[dt.date, int] | None:
+    """The last date written on an already-processed page of this source.
+
+    A run cut short by --limit must date its remaining pages the same way an
+    uninterrupted run would, so resuming picks the carry-forward back up
+    instead of starting blind.
+    """
+    best: tuple[dt.date, int, int] | None = None   # date, its page, note's last page
+    for md in out_dir.glob("*.md"):
+        try:
+            text = md.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        m = ORIGINAL_RE.search(text)
+        if not m or m.group(1) != original:
+            continue
+        d = DATE_ON_PAGE_RE.search(text)
+        if not d:
+            continue
+        date = iso_to_date(d.group(1))
+        if not date:
+            continue
+        pages = PAGES_RE.search(text)
+        first = int(pages.group(1)) if pages else 1
+        last = int(pages.group(2) or pages.group(1)) if pages else 1
+        if best is None or last > best[2]:
+            # The date was written where the note starts, but a later-ending
+            # note is the more recent one to carry forward from.
+            best = (date, first, last)
+    return (best[0], best[1]) if best else None
+
+
 # --------------------------------------------------------------------------
-# image preparation
+# page preparation
 # --------------------------------------------------------------------------
 
 def wait_until_stable(path: Path, tries: int = 4, pause: float = 2.0) -> bool:
@@ -301,13 +384,81 @@ def prepare_image(src: Path, workdir: Path) -> tuple[Path, str | None]:
         return src, f"image preprocessing failed ({e}), using original"
 
 
+def _pymupdf():
+    try:
+        import pymupdf  # PyMuPDF >= 1.24 exposes this name
+        return pymupdf
+    except ImportError:
+        pass
+    try:
+        import fitz  # older PyMuPDF
+        return fitz
+    except ImportError:
+        raise RuntimeError("PDF input needs PyMuPDF: pip install pymupdf") from None
+
+
+def source_page_count(path: Path) -> int:
+    """Pages in a source file. Images are one page; anything unreadable is one."""
+    if path.suffix.lower() not in PDF_EXTS:
+        return 1
+    try:
+        with _pymupdf().open(path) as doc:
+            return max(1, doc.page_count)
+    except RuntimeError:
+        raise
+    except Exception:  # noqa: BLE001 - a broken PDF is reported when it is rendered
+        return 1
+
+
+def render_pdf_pages(src: Path, workdir: Path,
+                     wanted: set[int] | None = None) -> list[tuple[int, Path]]:
+    """Rasterise PDF pages to JPEG. Returns [(page_number, path)].
+
+    Rendering rather than pulling the embedded image out keeps this correct for
+    pages the scanner split into several images, and gives the model exactly
+    what gets archived beside the note.
+    """
+    pm = _pymupdf()
+    out: list[tuple[int, Path]] = []
+    with pm.open(src) as doc:
+        for i in range(doc.page_count):
+            n = i + 1
+            if wanted is not None and n not in wanted:
+                continue
+            page = doc.load_page(i)
+            long_edge = max(page.rect.width, page.rect.height) or 1
+            zoom = min(max(PDF_LONG_EDGE_PX / long_edge, 0.5), 6.0)
+            pix = page.get_pixmap(matrix=pm.Matrix(zoom, zoom))
+            dest = workdir / f"{slugify(src.stem, 12)}_p{n:03d}.jpg"
+            try:
+                pix.pil_save(dest, format="JPEG", quality=PDF_JPEG_QUALITY)
+            except Exception:  # noqa: BLE001 - Pillow missing or unhappy
+                dest = dest.with_suffix(".png")
+                pix.save(dest)
+            out.append((n, dest))
+    return out
+
+
+def prepare_pages(src: Path, workdir: Path,
+                  wanted: set[int] | None = None) -> tuple[list[tuple[int, Path]], str | None]:
+    """Return ([(page_number, image_path)], note) for any supported source."""
+    if src.suffix.lower() in PDF_EXTS:
+        pages = render_pdf_pages(src, workdir, wanted)
+        if not pages:
+            raise RuntimeError("PDF produced no pages")
+        return pages, f"rendered {len(pages)} page(s) from PDF"
+    img, note = prepare_image(src, workdir)
+    return [(1, img)], note
+
+
 # --------------------------------------------------------------------------
 # the model call - the only provider-specific code in this file
 # --------------------------------------------------------------------------
 
-SCHEMA = {
+SEGMENT_SCHEMA = {
     "type": "object",
     "properties": {
+        "continues_previous": {"type": "boolean"},
         "title": {"type": "string"},
         "markdown": {"type": "string"},
         "slug": {"type": "string"},
@@ -316,7 +467,15 @@ SCHEMA = {
         "date_raw": {"type": ["string", "null"]},
         "date_iso": {"type": ["string", "null"]},
     },
-    "required": ["title", "markdown", "slug", "tags", "keyword", "date_raw", "date_iso"],
+    "required": ["continues_previous", "title", "markdown", "slug", "tags",
+                 "keyword", "date_raw", "date_iso"],
+    "additionalProperties": False,
+}
+
+SCHEMA = {
+    "type": "object",
+    "properties": {"segments": {"type": "array", "items": SEGMENT_SCHEMA}},
+    "required": ["segments"],
     "additionalProperties": False,
 }
 
@@ -330,55 +489,111 @@ SYSTEM_PROMPT = (
 )
 
 
-def build_prompt(image: Path, scan_date: dt.date, known_tags: list[str]) -> str:
+def build_prompt(image: Path, scan_date: dt.date, known_tags: list[str],
+                 ctx: dict | None) -> str:
+    """ctx places this page inside a multi-page scan, or is None for a lone image.
+
+    Everything ctx adds is about joining pages up. The transcription
+    instructions themselves are identical either way.
+    """
     vocab = (
         "Tags already used in this archive - reuse these wherever one fits, and only "
         "invent a new tag when none does:\n  " + ", ".join(known_tags) + "\n\n"
         if known_tags else ""
     )
+
+    where = ""
+    previous = ""
+    continues_rule = (
+        "continues_previous\n"
+        "  Always false. This page stands alone.\n\n"
+    )
+
+    if ctx:
+        where = f"It is page {ctx['page']} of {ctx['total']} in that scan.\n"
+        if ctx.get("prev_page"):
+            tail = ctx.get("prev_tail") or ""
+            previous = (
+                f"Page {ctx['prev_page']}, immediately before this one, ended as follows.\n"
+                f"  its title : {ctx.get('prev_title') or '(none)'}\n"
+                f"  its date  : {ctx.get('prev_date_raw') or '(none written)'}\n"
+                "  its last lines:\n"
+                + "\n".join("    " + ln for ln in tail.splitlines())
+                + "\n\n"
+            )
+            continues_rule = (
+                "continues_previous\n"
+                "  True when this entry carries on the entry from the page above - it\n"
+                "  picks up mid-sentence or mid-list, or plainly continues the same\n"
+                "  thought under the same heading. False when it starts something new.\n"
+                "  An entry that carries its own new date is never a continuation.\n"
+                "  When genuinely unsure, answer false.\n\n"
+            )
+        else:
+            continues_rule = (
+                "continues_previous\n"
+                "  Always false: no page of this scan comes before this one.\n\n"
+            )
+
+    year_hint = ""
+    if ctx and ctx.get("prev_year"):
+        year_hint = (
+            f"    - The page before this one was written in {ctx['prev_year']}. If this\n"
+            f"      entry writes no year, that is the year to use.\n"
+        )
+
     return f"""Transcribe the handwritten page at {image}
 
 This page was scanned on {scan_date.isoformat()}.
+{where}
+{previous}A page usually holds exactly one journal entry, so usually you return
+exactly one segment. Return more than one ONLY where a horizontal divider drawn
+on the page is followed by a NEW DATE. A divider on its own does not start a new
+entry: keep the text on both sides of it in the same segment, and transcribe the
+divider itself as *** on a line of its own. When in doubt, do not split.
 
-Return these fields:
+Return these fields for every segment:
 
-title
-  A short title for the note. If the page has its own heading, use it verbatim.
-  If it does not, write a brief descriptive one in the page's own language.
+{continues_rule}title
+  A short title for the entry. If it has its own heading, use it verbatim.
+  If it does not, write a brief descriptive one in the entry's own language.
+  For a continuation, repeat the previous page's title.
 
 markdown
   The transcription, WITHOUT repeating the title as a heading. Keep the page's
   structure. Do not translate.
 
 slug
-  3-6 words, lowercase, hyphen-separated, ENGLISH, from the page content.
+  3-6 words, lowercase, hyphen-separated, ENGLISH, from the entry's content.
 
 tags
   2-5 lowercase ENGLISH topic tags.
 
 {vocab}keyword
-  If the very top of the page carries a deliberate one-word label (a category
+  If the very top of the entry carries a deliberate one-word label (a category
   marker, not a heading or a date), return it. Otherwise null.
 
 date_raw
-  The date written on the page, copied exactly as it appears. Null if the page
+  The date written on the entry, copied exactly as it appears. Null if it
   carries no date.
 
 date_iso
   Your reading of that date, using these conventions:
     - A slashed two-number form like 07/26 means MONTH/YEAR -> "2026-07"
     - A dotted form like 26.07. means DAY.MONTH -> "2026-07-26"
-    - If no year is written, take it from the scan date above. A note cannot be
+{year_hint}    - If no year is written, take it from the scan date above. A note cannot be
       written after it was scanned, so roll back one year if that would happen.
     - "YYYY-MM-DD" when the day is known, "YYYY-MM" when only month and year
-      are, null when the page carries no date.
-  Do not guess a day that is not written.
+      are, null when the entry carries no date.
+  Do not guess a day that is not written. Return null rather than inferring a
+  date from surrounding pages - that is filled in afterwards, not by you.
 """
 
 
 def transcribe(image_path: Path, claude_bin: str, scan_date: dt.date,
-               known_tags: list[str], model: str | None = None) -> dict:
-    """Call the model on one image and return the parsed payload.
+               known_tags: list[str], ctx: dict | None = None,
+               model: str | None = None) -> dict:
+    """Call the model on one page and return the parsed payload.
 
     Everything provider-specific lives here. Swapping providers means
     rewriting this function and nothing else.
@@ -389,7 +604,7 @@ def transcribe(image_path: Path, claude_bin: str, scan_date: dt.date,
     ANTHROPIC_API_KEY auth and bypasses the Pro subscription.
     """
     cmd = [
-        claude_bin, "-p", build_prompt(image_path, scan_date, known_tags),
+        claude_bin, "-p", build_prompt(image_path, scan_date, known_tags, ctx),
         "--safe-mode",
         "--system-prompt", SYSTEM_PROMPT,
         "--tools", "Read",
@@ -429,33 +644,73 @@ def transcribe(image_path: Path, claude_bin: str, scan_date: dt.date,
         raw = re.sub(r"^```(?:json)?|```$", "", raw.strip(), flags=re.MULTILINE).strip()
         payload = json.loads(raw)
 
-    payload["_usage"] = env.get("usage", {})
-    payload["_cost_usd"] = env.get("total_cost_usd")
-    return payload
+    segments = payload.get("segments")
+    if isinstance(segments, dict):          # a lone segment, unwrapped
+        segments = [segments]
+    if not isinstance(segments, list) or not segments:
+        raise RuntimeError("no segments in response")
+
+    return {
+        "segments": segments,
+        "_usage": env.get("usage", {}),
+        "_cost_usd": env.get("total_cost_usd"),
+    }
 
 
 # --------------------------------------------------------------------------
 # note assembly
 # --------------------------------------------------------------------------
 
-def build_note(payload: dict, date_on_page: str | None,
-               image_name: str, original_name: str) -> str:
-    """Content first, metadata at the bottom. Not frontmatter, by design."""
-    title = (payload.get("title") or "").strip() or "Untitled"
-    body = (payload.get("markdown") or "").strip()
+BLOCK_START_RE = re.compile(r"^\s*(#{1,6}\s|[-*+]\s|\d+[.)]\s|>|\||\*\*\*|---)")
+OPEN_TAIL_RE = re.compile(r"[\w,;:\-\u2013\u2014]$")
 
-    parts = [f"# {title}", "", body, "", "---"]
-    keyword = (payload.get("keyword") or "").strip()
-    if keyword:
-        parts.append(f"keyword: {keyword}")
-    tags = [t.strip().lower() for t in payload.get("tags", []) if t and t.strip()]
-    if tags:
-        parts.append(f"tags: {', '.join(tags)}")
-    if date_on_page:
-        parts.append(f"date_on_page: {date_on_page}")
-    parts.append(f"scan: {image_name}")
+
+def join_markdown(chunks: list[str]) -> str:
+    """Stitch a note's pages together.
+
+    A page that resumes mid-sentence is joined with a space; anything else gets
+    a blank line, so a continuation never silently welds two paragraphs.
+    """
+    out = ""
+    for chunk in chunks:
+        chunk = (chunk or "").strip()
+        if not chunk:
+            continue
+        if not out:
+            out = chunk
+            continue
+        last_line = next((ln for ln in reversed(out.splitlines()) if ln.strip()), "")
+        mid_sentence = (
+            OPEN_TAIL_RE.search(last_line.rstrip())
+            and not BLOCK_START_RE.match(chunk)
+            and chunk[:1].islower()
+        )
+        out += (" " if mid_sentence else "\n\n") + chunk
+    return out
+
+
+def build_note(note: dict, original_name: str, total_pages: int) -> str:
+    """Content first, metadata at the bottom. Not frontmatter, by design."""
+    title = (note["title"] or "").strip() or "Untitled"
+    parts = [f"# {title}", "", note["body"].strip(), "", "---"]
+
+    if note.get("keyword"):
+        parts.append(f"keyword: {note['keyword']}")
+    if note.get("tags"):
+        parts.append(f"tags: {', '.join(note['tags'])}")
+    if note.get("date_on_page"):
+        parts.append(f"date_on_page: {note['date_on_page']}")
+    elif note.get("date_inferred"):
+        parts.append(f"date_inferred: {note['date_inferred']}")
+    parts.append(f"scan: {', '.join(note['image_names'])}")
+    if total_pages > 1:
+        parts.append(f"pages: {page_span(note['pages'])} of {total_pages}")
     parts.append(f"original: {original_name}")
     return "\n".join(parts) + "\n"
+
+
+def page_span(pages: list[int]) -> str:
+    return f"{pages[0]}" if pages[0] == pages[-1] else f"{pages[0]}-{pages[-1]}"
 
 
 TAGS_RE = re.compile(r"^tags:\s*(.+?)\s*$", re.MULTILINE)
@@ -478,19 +733,205 @@ def collect_known_tags(out_dir: Path, limit: int = 40) -> list[str]:
     return [t for t, _ in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]]
 
 
+def group_segments(segments: list[dict]) -> list[list[dict]]:
+    """One group per reflection. A group spans pages; a page can start a group."""
+    groups: list[list[dict]] = []
+    for seg in segments:
+        if groups and seg.get("continues_previous"):
+            groups[-1].append(seg)
+        else:
+            groups.append([seg])
+    return groups
+
+
+def resolve_dates(groups: list[list[dict]], scan_date: dt.date,
+                  seed: tuple[dt.date, int] | None = None) -> list[dict]:
+    """Decide each reflection's date, carrying dates forward across the file.
+
+    Pages within one scan are in chronological order, so an undated entry
+    belongs to the last date written before it. That inference only exists when
+    something else in the same file carries a date; otherwise the scan date
+    stands, exactly as it does for a single-page upload.
+    """
+    resolved: list[dict] = []
+    for g in groups:
+        page_date = None
+        date_on_page = None
+        note = ""
+        for seg in g:
+            d, text, why = parse_page_date(seg.get("date_iso"), scan_date)
+            note = note or why
+            if d and page_date is None:
+                page_date, date_on_page = d, text
+        resolved.append({
+            "group": g,
+            "page_date": page_date,
+            "date_on_page": date_on_page,
+            "date_note": note,
+        })
+
+    # Forwards: an undated entry inherits the last date written before it,
+    # including one written on a page an earlier run already turned into a note.
+    last: tuple[dt.date, int] | None = seed
+    for r in resolved:
+        if r["page_date"]:
+            last = (r["page_date"], r["group"][0]["_page"])
+        elif last:
+            r["date"] = last[0]
+            r["date_source"] = "carried"
+            r["date_inferred"] = f"{last[0].isoformat()} (carried from page {last[1]})"
+
+    # Backwards, for entries standing before the first date in the file:
+    # chronological order puts them at or before it, which beats the scan date.
+    nxt: tuple[dt.date, int] | None = None
+    for r in reversed(resolved):
+        if r["page_date"]:
+            nxt = (r["page_date"], r["group"][0]["_page"])
+        elif not r.get("date") and nxt:
+            r["date"] = nxt[0]
+            r["date_source"] = "inferred"
+            r["date_inferred"] = f"{nxt[0].isoformat()} (inferred from page {nxt[1]})"
+
+    backwards = ""
+    prev_written: dt.date | None = None
+    for r in resolved:
+        if r["page_date"]:
+            r["date"] = r["page_date"]
+            r["date_source"] = "page"
+            if prev_written and r["page_date"] < prev_written:
+                backwards = (f"page dates run backwards ({prev_written} then "
+                             f"{r['page_date']}); dates were used as written")
+            prev_written = r["page_date"]
+        elif not r.get("date"):
+            r["date"] = scan_date
+            r["date_source"] = "scan"
+    if backwards:
+        resolved[0]["date_note"] = "; ".join(
+            x for x in (resolved[0]["date_note"], backwards) if x
+        )
+    return resolved
+
+
+def assemble_note(r: dict) -> dict:
+    """Fold one group of segments into the fields a note file needs."""
+    g = r["group"]
+    tags: list[str] = []
+    for seg in g:
+        for t in seg.get("tags") or []:
+            t = t.strip().lower()
+            if t and t not in tags:
+                tags.append(t)
+    keyword = next(((s.get("keyword") or "").strip() for s in g
+                    if (s.get("keyword") or "").strip()), "")
+    pages: list[int] = []
+    images: list[Path] = []
+    for seg in g:
+        if seg["_page"] not in pages:
+            pages.append(seg["_page"])
+            images.append(seg["_image"])
+    return {
+        "title": g[0].get("title") or "",
+        "body": join_markdown([s.get("markdown") or "" for s in g]),
+        "slug": slugify(g[0].get("slug") or g[0].get("title") or "untitled"),
+        "tags": tags[:6],
+        "keyword": keyword,
+        "pages": pages,
+        "sources": images,
+        "date": r["date"],
+        "date_source": r["date_source"],
+        "date_on_page": r.get("date_on_page"),
+        "date_inferred": r.get("date_inferred"),
+        "date_note": r.get("date_note") or "",
+    }
+
+
+def context_for(segments: list[dict], page_no: int, total: int) -> dict:
+    """What page `page_no` needs to know about the page before it."""
+    ctx: dict = {"page": page_no, "total": total}
+    if not segments:
+        return ctx
+    prev = segments[-1]
+    body = (prev.get("markdown") or "").strip()
+    ctx.update({
+        "prev_page": prev["_page"],
+        "prev_title": prev.get("title"),
+        "prev_tail": "\n".join(body.splitlines()[-6:])[-500:],
+        "prev_date_raw": prev.get("date_raw"),
+    })
+    for seg in reversed(segments):
+        iso = (seg.get("date_iso") or "").strip()
+        if re.match(r"^\d{4}", iso):
+            ctx["prev_year"] = iso[:4]
+            break
+    return ctx
+
+
 # --------------------------------------------------------------------------
 # main
 # --------------------------------------------------------------------------
+
+def build_queue(out_dir: Path, candidates: list[Path], done: dict[str, set[int]],
+                manifest: dict, force: bool) -> tuple[list[dict], list[tuple[str, str]]]:
+    """What to process, page by page. Pages already covered by a note are skipped,
+    so a run stopped by --limit or Ctrl-C picks up where it left off."""
+    queue: list[dict] = []
+    skipped: list[tuple[str, str]] = []
+
+    for path in candidates:
+        if scan_date_from_name(path.name) is None:
+            skipped.append((path.name, "filename has no Scanned_YYYYMMDD-HHMM date"))
+            continue
+        if not wait_until_stable(path):
+            skipped.append((path.name, "still syncing, try again later"))
+            continue
+        key = file_key(path)
+        logged = {} if force else manifest.get(key, {})
+        if logged.get("pages_total") and                 len(pages_from_manifest(manifest, key)) >= logged["pages_total"]:
+            continue    # finished earlier; no need to open it, PDF reader or not
+
+        try:
+            total = source_page_count(path)
+        except RuntimeError as e:
+            skipped.append((path.name, str(e)))
+            continue
+
+        covered = (set() if force else
+                   done.get(path.name, set()) | pages_from_manifest(manifest, key))
+        todo = [n for n in range(1, total + 1) if n not in covered]
+        if not todo:
+            continue
+        if covered:
+            print(f"Resuming {path.name}: {len(todo)} of {total} page(s) left. "
+                  "An entry spanning the break will come out as two notes.\n")
+        queue.append({"path": path, "key": key, "pages": todo, "total": total,
+                      "seed": carry_seed(out_dir, path.name) if covered else None})
+
+    return queue, skipped
+
+
+def apply_limit(queue: list[dict], limit: int) -> list[dict]:
+    """Trim the queue to `limit` pages, cutting a file mid-way if need be."""
+    budget = limit
+    trimmed: list[dict] = []
+    for item in queue:
+        if budget <= 0:
+            break
+        if len(item["pages"]) > budget:
+            item = {**item, "pages": item["pages"][:budget]}
+        budget -= len(item["pages"])
+        trimmed.append(item)
+    return trimmed
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--limit", type=int, metavar="N",
-                    help="process at most N images this run")
+                    help="process at most N pages this run")
     ap.add_argument("--dry-run", action="store_true",
                     help="list what would be processed, call nothing, write nothing")
     ap.add_argument("--force", action="store_true",
-                    help="reprocess images even if they are already recorded")
+                    help="reprocess sources even if they are already recorded")
     ap.add_argument("--model", help="override the model (e.g. opus, sonnet)")
     args = ap.parse_args()
 
@@ -504,36 +945,23 @@ def main() -> int:
 
     candidates = sorted(
         p for p in drive_root.glob("Scanned_*")
-        if p.is_file() and p.suffix.lower() in IMAGE_EXTS
+        if p.is_file() and p.suffix.lower() in SOURCE_EXTS
     )
     if not candidates:
-        print(f"No Scanned_* images in {drive_root}")
+        print(f"No Scanned_* images or PDFs in {drive_root}")
         return 0
 
     manifest = load_manifest(out_dir)
-    done_originals = originals_already_written(out_dir)
     known_tags = collect_known_tags(out_dir)
-
-    queue: list[tuple[Path, str]] = []
-    skipped: list[tuple[str, str]] = []
-
-    for path in candidates:
-        if scan_date_from_name(path.name) is None:
-            skipped.append((path.name, "filename has no Scanned_YYYYMMDD-HHMM date"))
-            continue
-        if not wait_until_stable(path):
-            skipped.append((path.name, "still syncing, try again later"))
-            continue
-        key = file_key(path)
-        if not args.force and (key in manifest or path.name in done_originals):
-            continue
-        queue.append((path, key))
+    queue, skipped = build_queue(out_dir, candidates, pages_already_written(out_dir),
+                                 manifest, args.force)
 
     if args.limit:
-        deferred = max(0, len(queue) - args.limit)
-        queue = queue[: args.limit]
+        before = sum(len(i["pages"]) for i in queue)
+        queue = apply_limit(queue, args.limit)
+        deferred = before - sum(len(i["pages"]) for i in queue)
         if deferred:
-            print(f"Limiting to {args.limit} this run; {deferred} left for next time.\n")
+            print(f"Limiting to {args.limit} page(s) this run; {deferred} left for next time.\n")
 
     if not queue:
         print(f"Nothing new. {len(candidates)} scan(s) present, all processed.")
@@ -541,89 +969,142 @@ def main() -> int:
             print(f"  skipped  {name}  ({why})")
         return 0
 
+    total_pages = sum(len(i["pages"]) for i in queue)
     print(f"Input : {drive_root}")
     print(f"Output: {out_dir}")
-    print(f"{len(queue)} image(s) to process"
+    print(f"{total_pages} page(s) across {len(queue)} file(s) to process"
           + (f", reusing {len(known_tags)} existing tag(s)" if known_tags else "")
           + "\n")
 
     if args.dry_run:
-        for path, _ in queue:
-            print(f"  would process  {path.name}")
+        for item in queue:
+            pages = ",".join(str(p) for p in item["pages"])
+            print(f"  would process  {item['path'].name}  (page {pages} of {item['total']})")
         for name, why in skipped:
             print(f"  skipped        {name}  ({why})")
         return 0
 
     results: list[dict] = []
-    new_entries: dict = {}
     total_cost = 0.0
+    done_pages = 0
 
     with tempfile.TemporaryDirectory(prefix="scan-notes-") as workdir_s:
         workdir = Path(workdir_s)
 
-        for i, (path, key) in enumerate(queue, 1):
+        for item in queue:
+            path, key, multi = item["path"], item["key"], item["total"] > 1
             scan_date = scan_date_from_name(path.name)
-            print(f"[{i}/{len(queue)}] {path.name} ... ", end="", flush=True)
-            started = time.time()
+            print(f"{path.name}  ({len(item['pages'])} of {item['total']} page(s))")
 
             try:
-                image, prep_note = prepare_image(path, workdir)
-                if prep_note:
-                    print(f"({prep_note}) ", end="", flush=True)
-
-                payload = transcribe(image, claude_bin, scan_date, known_tags, args.model)
-
-                page_date, date_on_page, date_note = parse_page_date(
-                    payload.get("date_iso"), scan_date
-                )
-                use_date = page_date or scan_date
-                src = "page" if page_date else "scan"
-
-                slug = slugify(payload.get("slug") or payload.get("title") or "untitled")
-                md_path, img_path = claim_names(out_dir, use_date, slug, ".jpg")
-
-                note = build_note(payload, date_on_page, img_path.name, path.name)
-                md_path.write_text(note, encoding="utf-8")
-                shutil.copy2(image, img_path)
-
-                for t in payload.get("tags", []):
-                    t = t.strip().lower()
-                    if t and t not in known_tags:
-                        known_tags.append(t)
-
-                cost = payload.get("_cost_usd") or 0.0
-                total_cost += cost
-                new_entries[key] = {
-                    "original": path.name,
-                    "note": md_path.name,
-                    "image": img_path.name,
-                    "date_used": use_date.isoformat(),
-                    "date_source": src,
-                    "date_raw": payload.get("date_raw"),
-                    "date_iso": payload.get("date_iso"),
-                    "date_note": date_note or None,
-                    "tags": payload.get("tags", []),
-                    "processed_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
-                    "usage": payload.get("_usage", {}),
-                    "cost_usd": cost,
-                }
-                # Write after every page: an interrupted run keeps its progress.
-                save_manifest(out_dir, new_entries)
-
-                results.append({"src": path.name, "out": md_path.name,
-                                "date": f"{use_date.isoformat()} ({src})",
-                                "status": "ok", "note": date_note})
-                print(f"-> {md_path.name}  [{time.time() - started:.0f}s]")
-                if date_note:
-                    print(f"        note: {date_note}, used scan date")
-
-            except Exception as e:  # noqa: BLE001 - one bad page must not end the run
+                rendered, prep_note = prepare_pages(path, workdir, set(item["pages"]))
+            except Exception as e:  # noqa: BLE001 - a bad source must not end the run
                 results.append({"src": path.name, "out": "-", "date": "-",
                                 "status": "FAILED", "note": str(e)[:160]})
-                print(f"FAILED\n        {str(e)[:200]}")
+                print(f"  FAILED  {str(e)[:200]}\n")
+                continue
+            if prep_note:
+                print(f"  ({prep_note})")
 
-    print("\n" + "=" * 78)
-    w = max([len(r["src"]) for r in results] + [8])
+            segments: list[dict] = []
+            failed_pages: list[int] = []
+            usage: list[dict] = []
+            file_cost = 0.0
+
+            for page_no, image in rendered:
+                done_pages += 1
+                label = f"  [{done_pages}/{total_pages}]" + (f" p{page_no}" if multi else "")
+                print(f"{label} ... ", end="", flush=True)
+                started = time.time()
+                ctx = context_for(segments, page_no, item["total"]) if multi else None
+                try:
+                    payload = transcribe(image, claude_bin, scan_date, known_tags,
+                                         ctx, args.model)
+                except Exception as e:  # noqa: BLE001 - one bad page, not one bad run
+                    failed_pages.append(page_no)
+                    print(f"FAILED\n        {str(e)[:200]}")
+                    continue
+
+                new = payload["segments"]
+                for i, seg in enumerate(new):
+                    seg["_page"] = page_no
+                    seg["_image"] = image
+                    # Only a page's first entry can continue the page above, and
+                    # nothing can continue when nothing came before it.
+                    if i > 0 or not segments:
+                        seg["continues_previous"] = False
+                    for t in seg.get("tags") or []:
+                        t = t.strip().lower()
+                        if t and t not in known_tags:
+                            known_tags.append(t)
+                segments.extend(new)
+
+                file_cost += payload.get("_cost_usd") or 0.0
+                usage.append(payload.get("_usage", {}))
+                joined = " (continues)" if new[0].get("continues_previous") else ""
+                extra = f", {len(new)} entries" if len(new) > 1 else ""
+                print(f"ok{joined}{extra}  [{time.time() - started:.0f}s]")
+
+            total_cost += file_cost
+            if not segments:
+                results.append({"src": path.name, "out": "-", "date": "-",
+                                "status": "FAILED", "note": "no page transcribed"})
+                print()
+                continue
+
+            written = []
+            for note in [assemble_note(r) for r in
+                         resolve_dates(group_segments(segments), scan_date,
+                                       item.get("seed"))]:
+                md_path, img_paths = claim_names(out_dir, note["date"], note["slug"],
+                                                 len(note["sources"]))
+                note["image_names"] = [p.name for p in img_paths]
+                md_path.write_text(build_note(note, path.name, item["total"]),
+                                   encoding="utf-8")
+                for src_img, dest in zip(note["sources"], img_paths):
+                    shutil.copy2(src_img, dest)
+
+                span = page_span(note["pages"])
+                written.append({
+                    "note": md_path.name,
+                    "images": note["image_names"],
+                    "pages": span,
+                    "date_used": note["date"].isoformat(),
+                    "date_source": note["date_source"],
+                    "date_on_page": note["date_on_page"],
+                    "date_note": note["date_note"] or None,
+                    "tags": note["tags"],
+                })
+                results.append({
+                    "src": f"{path.name} p{span}" if multi else path.name,
+                    "out": md_path.name,
+                    "date": f"{note['date'].isoformat()} ({note['date_source']})",
+                    "status": "ok",
+                    "note": note["date_note"],
+                })
+                print(f"      -> {md_path.name}")
+
+            for n in failed_pages:
+                results.append({"src": f"{path.name} p{n}", "out": "-", "date": "-",
+                                "status": "FAILED", "note": "page transcription failed"})
+
+            # Written once per file, after its notes exist: the manifest is a log,
+            # never the thing that decides what still needs doing.
+            previous = {} if args.force else manifest.get(key, {})
+            save_manifest(out_dir, {key: {
+                "original": path.name,
+                "pages_total": item["total"],
+                "pages_done": sorted(set(previous.get("pages_done", []))
+                                     | ({p for p, _ in rendered} - set(failed_pages))),
+                "notes": previous.get("notes", []) + written,
+                "processed_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+                "usage": usage,
+                "cost_usd": round(previous.get("cost_usd", 0.0) + file_cost, 6),
+            }})
+            print()
+
+    print("=" * 78)
+    w = max([len(r["src"]) for r in results] + [len(n) for n, _ in skipped] + [8])
     print(f"{'SOURCE'.ljust(w)}  {'DATE'.ljust(22)}  STATUS   OUTPUT")
     print("-" * 78)
     for r in results:
@@ -636,7 +1117,7 @@ def main() -> int:
 
     ok = sum(1 for r in results if r["status"] == "ok")
     failed = len(results) - ok
-    print(f"{ok} written, {failed} failed, {len(skipped)} skipped"
+    print(f"{ok} note(s) written, {failed} failed, {len(skipped)} skipped"
           + (f"  (~${total_cost:.2f} of subscription usage)" if total_cost else ""))
     print(f"Output: {out_dir}")
     return 1 if failed else 0
@@ -646,5 +1127,6 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except KeyboardInterrupt:
-        print("\nInterrupted. Progress up to the last completed page is saved.")
+        print("\nInterrupted. Notes already written are safe; the file in progress "
+              "resumes from its first uncovered page next run.")
         sys.exit(130)
