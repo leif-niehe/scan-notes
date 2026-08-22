@@ -4,6 +4,17 @@ Scanned handwritten reflections → Markdown, one note per reflection, through t
 Claude Code CLI so the work draws on a Pro subscription. All the code is in
 [notes.py](notes.py).
 
+## Explaining this project to Leif
+
+Leif reads the big picture fine but doesn't code, so don't explain this project
+by naming functions and expecting that to land. When a function name is the
+natural way to point at something (`transcribe`, `load_config`,
+`continues_previous`, ...), say in plain words what it actually does the first
+time it comes up in an explanation — not just its name. "the part that calls the
+model to read a page" beats "`transcribe`" on its own. Same for jargon like
+"cache creation tokens", "manifest", "stub it" — either use the plain-language
+version or define it in a half-sentence before using the term.
+
 ## Keep the map in sync
 
 [WORKFLOW.md](WORKFLOW.md) draws the whole pipeline in Mermaid. **It is part of
