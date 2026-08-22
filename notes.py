@@ -30,6 +30,8 @@ CONFIG = REPO / "config.json"
 CONFIG_EXAMPLE = REPO / "config.example.json"
 
 OUTPUT_SUBPATH = "02_Areas/Personal/Reflection AI automated"
+MD_SUBDIR = "Markdown"
+IMG_SUBDIR = "JPEG"
 MANIFEST_NAME = "_manifest.json"
 
 SCAN_RE = re.compile(r"^Scanned_(\d{8})-(\d{4})", re.IGNORECASE)
@@ -188,15 +190,16 @@ def image_names_for(stem: str, count: int) -> list[str]:
     return [f"{stem}.jpg" if i == 0 else f"{stem}_p{i + 1}.jpg" for i in range(count)]
 
 
-def claim_names(out_dir: Path, date: dt.date, slug: str,
+def claim_names(md_dir: Path, img_dir: Path, date: dt.date, slug: str,
                 image_count: int) -> tuple[Path, list[Path]]:
-    """Find a free (md, images) filename set, adding -2, -3 on collision."""
+    """Find a free (note file, image files) filename set, adding -2, -3 on
+    collision. The note goes in md_dir, its page images in img_dir."""
     base = f"{date.isoformat()}_{slug}"
     n = 1
     while True:
         stem = base if n == 1 else f"{base}-{n}"
-        md = out_dir / f"{stem}.md"
-        imgs = [out_dir / name for name in image_names_for(stem, image_count)]
+        md = md_dir / f"{stem}.md"
+        imgs = [img_dir / name for name in image_names_for(stem, image_count)]
         if not md.exists() and not any(p.exists() for p in imgs):
             return md, imgs
         n += 1
@@ -254,16 +257,16 @@ def pages_from_manifest(manifest: dict, key: str) -> set[int]:
     return set(entry.get("pages_done") or [1])
 
 
-def pages_already_written(out_dir: Path) -> dict[str, set[int]]:
+def pages_already_written(md_dir: Path) -> dict[str, set[int]]:
     """Source filename -> page numbers already turned into notes.
 
-    The output folder, not the manifest, is the authoritative answer to "has
+    The notes folder, not the manifest, is the authoritative answer to "has
     this been processed". It cannot be lost to a Drive sync conflict. Notes
     from a multi-page source carry a `pages:` line, so a run cut short by
     --limit resumes at the first page no note covers.
     """
     seen: dict[str, set[int]] = {}
-    for md in out_dir.glob("*.md"):
+    for md in md_dir.glob("*.md"):
         try:
             text = md.read_text(encoding="utf-8")
         except OSError:
@@ -295,7 +298,7 @@ def iso_to_date(iso: str) -> dt.date | None:
         return None
 
 
-def carry_seed(out_dir: Path, original: str) -> tuple[dt.date, int] | None:
+def carry_seed(md_dir: Path, original: str) -> tuple[dt.date, int] | None:
     """The last date written on an already-processed page of this source.
 
     A run cut short by --limit must date its remaining pages the same way an
@@ -303,7 +306,7 @@ def carry_seed(out_dir: Path, original: str) -> tuple[dt.date, int] | None:
     instead of starting blind.
     """
     best: tuple[dt.date, int, int] | None = None   # date, its page, note's last page
-    for md in out_dir.glob("*.md"):
+    for md in md_dir.glob("*.md"):
         try:
             text = md.read_text(encoding="utf-8")
         except OSError:
@@ -716,10 +719,10 @@ def page_span(pages: list[int]) -> str:
 TAGS_RE = re.compile(r"^tags:\s*(.+?)\s*$", re.MULTILINE)
 
 
-def collect_known_tags(out_dir: Path, limit: int = 40) -> list[str]:
+def collect_known_tags(md_dir: Path, limit: int = 40) -> list[str]:
     """Existing vocabulary, most used first, so tags cluster instead of drifting."""
     counts: dict[str, int] = {}
-    for md in out_dir.glob("*.md"):
+    for md in md_dir.glob("*.md"):
         try:
             m = TAGS_RE.search(md.read_text(encoding="utf-8"))
         except OSError:
@@ -870,7 +873,7 @@ def context_for(segments: list[dict], page_no: int, total: int) -> dict:
 # main
 # --------------------------------------------------------------------------
 
-def build_queue(out_dir: Path, candidates: list[Path], done: dict[str, set[int]],
+def build_queue(md_dir: Path, candidates: list[Path], done: dict[str, set[int]],
                 manifest: dict, force: bool) -> tuple[list[dict], list[tuple[str, str]]]:
     """What to process, page by page. Pages already covered by a note are skipped,
     so a run stopped by --limit or Ctrl-C picks up where it left off."""
@@ -904,9 +907,34 @@ def build_queue(out_dir: Path, candidates: list[Path], done: dict[str, set[int]]
             print(f"Resuming {path.name}: {len(todo)} of {total} page(s) left. "
                   "An entry spanning the break will come out as two notes.\n")
         queue.append({"path": path, "key": key, "pages": todo, "total": total,
-                      "seed": carry_seed(out_dir, path.name) if covered else None})
+                      "seed": carry_seed(md_dir, path.name) if covered else None})
 
     return queue, skipped
+
+
+def migrate_flat_layout(out_dir: Path, md_dir: Path, img_dir: Path) -> int:
+    """Move notes and images an older run left directly in out_dir into the
+    Markdown/ and JPEG/ subfolders.
+
+    One-time and safe to run every time: once nothing is left loose in
+    out_dir, there is nothing to move. This has to happen before anything
+    reads md_dir, or pages already done would look undone and get reprocessed.
+    """
+    moved = 0
+    for p in out_dir.iterdir():
+        if not p.is_file():
+            continue
+        if p.suffix.lower() == ".md":
+            dest = md_dir / p.name
+        elif p.suffix.lower() == ".jpg":
+            dest = img_dir / p.name
+        else:
+            continue
+        if dest.exists():
+            continue
+        shutil.move(str(p), str(dest))
+        moved += 1
+    return moved
 
 
 def apply_limit(queue: list[dict], limit: int) -> list[dict]:
@@ -941,7 +969,14 @@ def main() -> int:
 
     drive_root: Path = cfg["drive_root"]
     out_dir = drive_root / OUTPUT_SUBPATH
-    out_dir.mkdir(parents=True, exist_ok=True)
+    md_dir = out_dir / MD_SUBDIR
+    img_dir = out_dir / IMG_SUBDIR
+    md_dir.mkdir(parents=True, exist_ok=True)
+    img_dir.mkdir(parents=True, exist_ok=True)
+    moved = migrate_flat_layout(out_dir, md_dir, img_dir)
+    if moved:
+        print(f"Moved {moved} file(s) from the old flat layout into "
+              f"{MD_SUBDIR}/ and {IMG_SUBDIR}/.\n")
 
     candidates = sorted(
         p for p in drive_root.glob("Scanned_*")
@@ -952,8 +987,8 @@ def main() -> int:
         return 0
 
     manifest = load_manifest(out_dir)
-    known_tags = collect_known_tags(out_dir)
-    queue, skipped = build_queue(out_dir, candidates, pages_already_written(out_dir),
+    known_tags = collect_known_tags(md_dir)
+    queue, skipped = build_queue(md_dir, candidates, pages_already_written(md_dir),
                                  manifest, args.force)
 
     if args.limit:
@@ -1056,7 +1091,7 @@ def main() -> int:
             for note in [assemble_note(r) for r in
                          resolve_dates(group_segments(segments), scan_date,
                                        item.get("seed"))]:
-                md_path, img_paths = claim_names(out_dir, note["date"], note["slug"],
+                md_path, img_paths = claim_names(md_dir, img_dir, note["date"], note["slug"],
                                                  len(note["sources"]))
                 note["image_names"] = [p.name for p in img_paths]
                 md_path.write_text(build_note(note, path.name, item["total"]),

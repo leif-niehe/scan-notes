@@ -47,7 +47,7 @@ flowchart TD
     E --> I["group_segments<br/>fold continuations into one note"]
     I --> J["resolve_dates<br/>see diagram 4"]
     J --> K["assemble_note<br/>join pages, merge tags,<br/>keep one image per page"]
-    K --> L["claim_names and build_note<br/>write the .md, copy the page images"]
+    K --> L["claim_names and build_note<br/>write the .md into Markdown/,<br/>copy the page images into JPEG/"]
     L --> M["save_manifest<br/>a log, never the source of truth"]
 ```
 
@@ -114,6 +114,7 @@ Everything is in [notes.py](notes.py), in roughly this order.
 | Date from the scan filename | `scan_date_from_name` |
 | Validate a date the model read | `parse_page_date` |
 | Output filenames, collision suffixes | `slugify`, `image_names_for`, `claim_names` |
+| Moving an older flat-layout archive into `Markdown/`/`JPEG/` | `migrate_flat_layout` |
 | Run log, read and merged before every write | `load_manifest`, `save_manifest`, `pages_from_manifest` |
 | What is already done, and the date to resume with | `pages_already_written`, `carry_seed` |
 | Page images in, whatever the source | `wait_until_stable`, `prepare_image`, `render_pdf_pages`, `prepare_pages` |
@@ -133,14 +134,22 @@ Swapping model provider means rewriting `transcribe` and nothing else.
 My Drive/
 ├── Scanned_20260819-1500.pdf              the original, untouched
 └── 02_Areas/Personal/Reflection AI automated/
-    ├── 2026-07-26_relaxed-productivity.md      one reflection, pages 1-3
-    ├── 2026-07-26_relaxed-productivity.jpg     page 1
-    ├── 2026-07-26_relaxed-productivity_p2.jpg  page 2
-    ├── 2026-07-26_relaxed-productivity_p3.jpg  page 3
-    ├── 2026-08-02_reading-notes.md             next reflection, page 4
-    ├── 2026-08-02_reading-notes.jpg
-    └── _manifest.json                          the run log
+    ├── Markdown/
+    │   ├── 2026-07-26_relaxed-productivity.md      one reflection, pages 1-3
+    │   └── 2026-08-02_reading-notes.md             next reflection, page 4
+    ├── JPEG/
+    │   ├── 2026-07-26_relaxed-productivity.jpg     page 1
+    │   ├── 2026-07-26_relaxed-productivity_p2.jpg  page 2
+    │   ├── 2026-07-26_relaxed-productivity_p3.jpg  page 3
+    │   └── 2026-08-02_reading-notes.jpg
+    └── _manifest.json                          the run log, one level up
 ```
+
+A note and its images are always in these two subfolders, never loose in the
+folder above them. If an older run left files loose there (from before this
+split existed), the next run moves them into `Markdown/`/`JPEG/` itself, before
+it looks at what's already done — `migrate_flat_layout`, one-time and harmless
+to run more than once.
 
 Because every note keeps an image of every page it covers, the whole archive can
 be re-transcribed against a better model later: delete the manifest, or run with

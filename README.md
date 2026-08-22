@@ -11,20 +11,24 @@ read it.
 
 ```
 My Drive/Scanned_20260811-2108.jpg
-        -> .../Reflection AI automated/2026-07-01_relaxed-productivity-ai-prompts.md
-        -> .../Reflection AI automated/2026-07-01_relaxed-productivity-ai-prompts.jpg
+        -> .../Reflection AI automated/Markdown/2026-07-01_relaxed-productivity-ai-prompts.md
+        -> .../Reflection AI automated/JPEG/2026-07-01_relaxed-productivity-ai-prompts.jpg
 ```
+
+The note (`.md`) always goes in a `Markdown/` subfolder and its page image(s) in
+a `JPEG/` subfolder, both inside `Reflection AI automated/` — kept apart so
+skimming one kind of file doesn't mean scrolling past the other.
 
 A PDF works the same way, except that it holds a stack of pages and comes out as
 one note per reflection rather than one note per file:
 
 ```
 My Drive/Scanned_20260819-1500.pdf        (9 pages, 5 reflections)
-        -> .../2026-07-26_relaxed-productivity.md       (pages 1-3)
-        -> .../2026-07-26_relaxed-productivity.jpg
-        -> .../2026-07-26_relaxed-productivity_p2.jpg
-        -> .../2026-07-26_relaxed-productivity_p3.jpg
-        -> .../2026-08-02_reading-notes.md              (page 4)
+        -> .../Markdown/2026-07-26_relaxed-productivity.md       (pages 1-3)
+        -> .../JPEG/2026-07-26_relaxed-productivity.jpg
+        -> .../JPEG/2026-07-26_relaxed-productivity_p2.jpg
+        -> .../JPEG/2026-07-26_relaxed-productivity_p3.jpg
+        -> .../Markdown/2026-08-02_reading-notes.md              (page 4)
         ...
 ```
 
@@ -103,6 +107,9 @@ scan: 2026-07-01_relaxed-productivity.jpg, 2026-07-01_relaxed-productivity_p2.jp
 pages: 2-3 of 9
 original: Scanned_20260819-1500.pdf
 ```
+
+`scan:` names the image files, not their path — they sit in the sibling `JPEG/`
+folder next to this note's `Markdown/` folder.
 
 `scan:` lists one image per page of the reflection, so a note spanning two pages
 carries two.
@@ -186,17 +193,21 @@ all resolve to the first of it.
 Only code travels through git. The two things that must stay in sync between
 machines travel through Drive:
 
-- **`_manifest.json`**, in the output folder — a run log keyed by filename and
-  content hash, holding what was processed, when, what the date decision was, and
-  what it cost.
+- **`_manifest.json`**, directly in the output folder (not inside `Markdown/` or
+  `JPEG/`) — a run log keyed by filename and content hash, holding what was
+  processed, when, what the date decision was, and what it cost.
 - **The notes themselves.** The authoritative answer to "has this page been
-  processed" is whether any `.md` in the output folder carries its filename on an
+  processed" is whether any `.md` in `Markdown/` carries its filename on an
   `original:` line — and for a multi-page source, whether some note's `pages:`
   line covers that page number. A PDF stopped part way through by `--limit` or
   Ctrl-C resumes at its first uncovered page, and reads the date it should carry
   forward back out of the notes the earlier run wrote, so a split run dates its
   notes exactly as an uninterrupted one would. The only cost of stopping mid
   file is that a reflection straddling the break comes out as two notes.
+
+If an older run left notes and images loose directly in the output folder
+(from before `Markdown/`/`JPEG/` existed), the next run moves them into place
+first, so this check still finds them.
 
 That second check is the one that matters. A single JSON file written by two
 machines is exactly what Drive resolves by making a conflicted copy, silently
