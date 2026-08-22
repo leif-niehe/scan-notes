@@ -241,6 +241,11 @@ set in the environment.
 - **Splitting is biased towards separate notes.** Two reflections welded into
   one file is the harder mistake to notice months later; one reflection split
   across two files is obvious the moment you read them.
+- **A page with its own date never joins a different date.** The model is asked
+  for this, but it is also enforced in code (`enforce_date_boundaries`): once a
+  new explicit date appears, the note before it is closed, no matter what the
+  model thought was continuing. Undated pages, and repeats of the same date,
+  still merge as usual.
 - **No translation.** Pages are transcribed in the language written. Slugs and
   tags are always English, so one vocabulary covers the whole archive.
 - **Tags are fed back.** Existing tags from the output folder are passed to the
@@ -248,7 +253,7 @@ set in the environment.
   drifting between `ai-prompting` and `ai-prompts`.
 - **Filenames that don't match `Scanned_YYYYMMDD-HHMM` are skipped**, not
   date-guessed, and reported in the summary.
-- **PDF pages are rendered, not pulled out.** Rendering at ~2200px on the long
+- **PDF pages are rendered, not pulled out.** Rendering at ~3400px on the long
   edge stays correct when a scanner splits one page into several images, and the
   model sees exactly what gets archived beside the note.
 - **The archived `.jpg` is the normalised image** — EXIF-rotated, HEIC converted.

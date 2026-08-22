@@ -44,9 +44,10 @@ MAX_BACKDATE_DAYS = 5 * 365
 CALL_TIMEOUT_S = 300
 
 # PDF pages are rasterised to this long edge. The model downsamples below this
-# anyway; the headroom is for re-transcribing against a better model later.
-PDF_LONG_EDGE_PX = 2200
-PDF_JPEG_QUALITY = 88
+# anyway; the headroom is for re-transcribing against a better model later, and
+# for Leif reading the archived page himself rather than the transcription.
+PDF_LONG_EDGE_PX = 3400
+PDF_JPEG_QUALITY = 95
 
 CLAUDE_FALLBACKS = [
     Path.home() / ".local" / "bin" / "claude.exe",
@@ -736,6 +737,24 @@ def collect_known_tags(md_dir: Path, limit: int = 40) -> list[str]:
     return [t for t, _ in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]]
 
 
+def enforce_date_boundaries(segments: list[dict]) -> None:
+    """A segment carrying its own date can never continue a different date
+    already established earlier in the file.
+
+    The prompt already asks the model for this, but a misread here silently
+    welds two days into one note - the mistake nobody notices until months
+    later. So it is enforced here too, in code, not left to the model alone.
+    Mutates continues_previous in place; equal or absent dates are untouched.
+    """
+    last_date: str | None = None
+    for seg in segments:
+        cur = (seg.get("date_iso") or "").strip() or None
+        if cur and last_date and cur != last_date and seg.get("continues_previous"):
+            seg["continues_previous"] = False
+        if cur:
+            last_date = cur
+
+
 def group_segments(segments: list[dict]) -> list[list[dict]]:
     """One group per reflection. A group spans pages; a page can start a group."""
     groups: list[list[dict]] = []
@@ -1087,6 +1106,7 @@ def main() -> int:
                 print()
                 continue
 
+            enforce_date_boundaries(segments)
             written = []
             for note in [assemble_note(r) for r in
                          resolve_dates(group_segments(segments), scan_date,

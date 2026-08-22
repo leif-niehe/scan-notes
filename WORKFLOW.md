@@ -36,7 +36,7 @@ until you clear it out by hand.
 ```mermaid
 flowchart TD
     A["a source file and<br/>the pages still to do"] --> B{"PDF?"}
-    B -->|"yes"| C["render_pdf_pages<br/>rasterise each page to JPEG<br/>at ~2200px on the long edge"]
+    B -->|"yes"| C["render_pdf_pages<br/>rasterise each page to JPEG<br/>at ~3400px on the long edge"]
     B -->|"no"| D["prepare_image<br/>EXIF rotation, HEIC conversion"]
     C --> E["for each page, in order"]
     D --> E
@@ -67,14 +67,23 @@ flowchart TD
     B -->|"no"| D["one entry; a bare divider<br/>is transcribed as ***"]
     C --> E{"does the first entry pick up<br/>the thought from the page above?"}
     D --> E
-    E -->|"yes"| F["joins the note above"]
+    E -->|"yes"| H{"enforce_date_boundaries:<br/>does it carry its own date,<br/>different from the last one seen?"}
     E -->|"no, or unsure"| G["starts a new note"]
+    H -->|"yes"| G
+    H -->|"no"| F["joins the note above"]
     C -.->|"always"| G
 ```
 
 The bias is deliberate: unsure means *new note*. One reflection split across two
 files is obvious the moment you read them; two reflections welded into one file
 is the mistake you notice months later, if ever.
+
+`enforce_date_boundaries` is the hard backstop for that: the model is already
+asked never to treat a dated entry as a continuation, but a misread there would
+silently merge two different days into one note. Two entries with the same
+explicit date, or where the later one carries no date of its own, still merge
+as usual - only an explicit date change forces the split, no matter what the
+model decided.
 
 ---
 
@@ -119,7 +128,7 @@ Everything is in [notes.py](notes.py), in roughly this order.
 | What is already done, and the date to resume with | `pages_already_written`, `carry_seed` |
 | Page images in, whatever the source | `wait_until_stable`, `prepare_image`, `render_pdf_pages`, `prepare_pages` |
 | **The only provider-specific code** | `SCHEMA`, `SYSTEM_PROMPT`, `build_prompt`, `transcribe` |
-| Pages into reflections | `context_for`, `group_segments`, `resolve_dates` |
+| Pages into reflections | `context_for`, `enforce_date_boundaries`, `group_segments`, `resolve_dates` |
 | Reflections into files | `join_markdown`, `assemble_note`, `build_note` |
 | Tag vocabulary fed back to the model | `collect_known_tags` |
 | Queue, page budget, the run itself | `build_queue`, `apply_limit`, `main` |
