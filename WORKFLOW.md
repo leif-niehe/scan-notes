@@ -49,7 +49,9 @@ flowchart TD
     J --> K["assemble_note<br/>join pages, merge tags,<br/>keep one image per page"]
     K --> K2{"any text in the note?"}
     K2 -->|"yes"| L["claim_names and build_note<br/>write the .md into Markdown/,<br/>copy the page images into JPEG/"]
-    K2 -->|"no - blank page(s)"| K3["write nothing, copy no image<br/>logged as a blank page, not a failure"]
+    K2 -->|"no"| K4{"flag_review on any page?"}
+    K4 -->|"no - genuinely blank"| K3["write nothing, copy no image<br/>logged as a blank page, not a failure"]
+    K4 -->|"yes - a drawing, mark,<br/>or bleed-through"| L
     L --> M["save_manifest<br/>a log, never the source of truth"]
     K3 --> M
 ```
@@ -58,6 +60,13 @@ A page that fails is logged and skipped; the rest of the file carries on. The
 notes for a file are written once all its queued pages are done, so stopping
 mid-file loses at most that one file's transcriptions — and the next run picks
 those pages back up.
+
+A page with no text is never guessed at, but it isn't always thrown away
+either: `flag_review`, set per page in diagram 3's prompt, tells the two apart.
+Off means genuinely blank - discarded. On means something is there that isn't
+words - a drawing, a mark, ink from the other side - so the note and its image
+are kept, and it's called out in the run summary as flagged for manual review
+rather than silently trusted or silently dropped.
 
 ---
 

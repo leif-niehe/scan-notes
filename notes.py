@@ -470,9 +470,10 @@ SEGMENT_SCHEMA = {
         "keyword": {"type": ["string", "null"]},
         "date_raw": {"type": ["string", "null"]},
         "date_iso": {"type": ["string", "null"]},
+        "flag_review": {"type": "boolean"},
     },
     "required": ["continues_previous", "title", "markdown", "slug", "tags",
-                 "keyword", "date_raw", "date_iso"],
+                 "keyword", "date_raw", "date_iso", "flag_review"],
     "additionalProperties": False,
 }
 
@@ -550,10 +551,18 @@ def build_prompt(image: Path, scan_date: dt.date, known_tags: list[str],
 
 This page was scanned on {scan_date.isoformat()}.
 {where}
-{previous}If the page is blank, or carries no more than a stray mark, page number,
-or printed artifact with nothing handwritten to transcribe, return exactly one
-segment with markdown, title and slug set to "", tags set to [], and keyword,
-date_raw, date_iso set to null. Do not invent content to fill it.
+{previous}If the page is genuinely blank - nothing on it worth keeping, at most a
+printed page number or a scanning artifact - return exactly one segment with
+markdown, title and slug set to "", tags set to [], keyword, date_raw, date_iso
+set to null, and flag_review set to false.
+
+If the page has no handwritten TEXT to transcribe but is not empty either - a
+drawing, a doodle, a diagram, an unreadable mark, something showing through
+from the other side of the page - do not guess at what it is or invent a
+transcription for it. Return exactly one segment the same way as a blank page
+(markdown, title, slug "", tags [], the rest null) EXCEPT set flag_review to
+true, so the page is kept for a human to look at rather than discarded.
+flag_review is otherwise always false.
 
 A page usually holds exactly one journal entry, so usually you return
 exactly one segment. Return more than one ONLY where a horizontal divider drawn
@@ -862,6 +871,7 @@ def assemble_note(r: dict) -> dict:
         "slug": slugify(g[0].get("slug") or g[0].get("title") or "untitled"),
         "tags": tags[:6],
         "keyword": keyword,
+        "flagged": any(seg.get("flag_review") for seg in g),
         "pages": pages,
         "sources": images,
         "date": r["date"],
@@ -1116,11 +1126,14 @@ def main() -> int:
             for note in [assemble_note(r) for r in
                          resolve_dates(group_segments(segments), scan_date,
                                        item.get("seed"))]:
-                if not note["body"].strip():
-                    # A blank page: transcribed, but nothing was on it. No note,
-                    # no image copy - writing either would just be clutter to
-                    # clean up later, and the page still counts as done below.
-                    span = page_span(note["pages"])
+                span = page_span(note["pages"])
+                body_text = note["body"].strip()
+
+                if not body_text and not note["flagged"]:
+                    # Genuinely blank: transcribed, but nothing was on it. No
+                    # note, no image copy - writing either would just be
+                    # clutter to clean up later, and the page still counts as
+                    # done below.
                     results.append({
                         "src": f"{path.name} p{span}" if multi else path.name,
                         "out": "-", "date": "-", "status": "blank",
@@ -1128,6 +1141,20 @@ def main() -> int:
                     })
                     print(f"      (blank page{f' {span}' if multi else ''}, no note written)")
                     continue
+
+                if not body_text and note["flagged"]:
+                    # No text, but not nothing either - a drawing, a mark,
+                    # bleed-through. Kept, not guessed at, so it can be
+                    # checked and discarded by hand if it turns out to be
+                    # nothing (see the flagged list at the end of the run).
+                    note["title"] = note["title"] or "Flagged page (no text)"
+                    note["body"] = (
+                        "*(No transcribable text on this page - flagged for manual "
+                        "review. Could be a drawing, a mark, or print showing through "
+                        "from the other side; check the image and delete this note if "
+                        "it isn't worth keeping.)*"
+                    )
+
                 md_path, img_paths = claim_names(md_dir, img_dir, note["date"], note["slug"],
                                                  len(note["sources"]))
                 note["image_names"] = [p.name for p in img_paths]
@@ -1136,7 +1163,6 @@ def main() -> int:
                 for src_img, dest in zip(note["sources"], img_paths):
                     shutil.copy2(src_img, dest)
 
-                span = page_span(note["pages"])
                 written.append({
                     "note": md_path.name,
                     "images": note["image_names"],
@@ -1146,15 +1172,22 @@ def main() -> int:
                     "date_on_page": note["date_on_page"],
                     "date_note": note["date_note"] or None,
                     "tags": note["tags"],
+                    "flagged": note["flagged"],
                 })
+                note_status = "review" if note["flagged"] else "ok"
+                note_text = "; ".join(
+                    x for x in (note["date_note"],
+                                "flagged for manual review" if note["flagged"] else "") if x
+                )
                 results.append({
                     "src": f"{path.name} p{span}" if multi else path.name,
                     "out": md_path.name,
                     "date": f"{note['date'].isoformat()} ({note['date_source']})",
-                    "status": "ok",
-                    "note": note["date_note"],
+                    "status": note_status,
+                    "note": note_text,
                 })
-                print(f"      -> {md_path.name}")
+                print(f"      -> {md_path.name}"
+                      + ("  (flagged for review)" if note["flagged"] else ""))
 
             for n in failed_pages:
                 results.append({"src": f"{path.name} p{n}", "out": "-", "date": "-",
@@ -1188,11 +1221,20 @@ def main() -> int:
     print("-" * 78)
 
     ok = sum(1 for r in results if r["status"] == "ok")
+    review = [r for r in results if r["status"] == "review"]
     blank = sum(1 for r in results if r["status"] == "blank")
     failed = sum(1 for r in results if r["status"] == "FAILED")
-    print(f"{ok} note(s) written, {blank} blank page(s) skipped, {failed} failed, "
-          f"{len(skipped)} skipped"
+    print(f"{ok} note(s) written, {len(review)} flagged for review, "
+          f"{blank} blank page(s) skipped, {failed} failed, {len(skipped)} skipped"
           + (f"  (~${total_cost:.2f} of subscription usage)" if total_cost else ""))
+    if review:
+        print()
+        print("Flagged for manual review - no text, but not blank either "
+              "(a drawing, a mark, print showing through):")
+        for r in review:
+            print(f"  {r['out']}")
+        print("Open these, check the page image, and delete the note (and its "
+              "image in JPEG/) if it isn't worth keeping.")
     print(f"Output: {out_dir}")
     return 1 if failed else 0
 

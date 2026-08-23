@@ -144,12 +144,21 @@ note. Where one ends and the next begins is read off the pages themselves:
 Pages inside one note are joined with a blank line, except where a page resumes
 mid-sentence, which is joined with a space.
 
-## Blank pages
+## Blank pages, and pages with no text
 
 A page with nothing handwritten on it — a blank leaf, a stray mark, just a
 printed page number — produces no note and no image copy. The run summary
 lists it as a blank page, not a failure, and the run does not retry it next
 time. Nothing is guessed at to fill an empty page.
+
+A page can also have *something* on it that isn't text — a drawing, a
+doodle, a diagram, a mark that doesn't read as words, ink showing through
+from the other side. That's not treated as blank: the note and its page image
+are kept, since discarding it could throw away a real drawing. Its content is
+never guessed at or described — the note just says there's no transcribable
+text — and the run summary calls these out separately, as flagged for manual
+review, so you can open each one, look at the image, and delete it yourself
+if it turns out to be nothing.
 
 ## How the date is decided
 
