@@ -144,6 +144,13 @@ note. Where one ends and the next begins is read off the pages themselves:
 Pages inside one note are joined with a blank line, except where a page resumes
 mid-sentence, which is joined with a space.
 
+## Blank pages
+
+A page with nothing handwritten on it — a blank leaf, a stray mark, just a
+printed page number — produces no note and no image copy. The run summary
+lists it as a blank page, not a failure, and the run does not retry it next
+time. Nothing is guessed at to fill an empty page.
+
 ## How the date is decided
 
 The date in the filename comes from the page itself, falling back to the scan:

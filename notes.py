@@ -550,7 +550,12 @@ def build_prompt(image: Path, scan_date: dt.date, known_tags: list[str],
 
 This page was scanned on {scan_date.isoformat()}.
 {where}
-{previous}A page usually holds exactly one journal entry, so usually you return
+{previous}If the page is blank, or carries no more than a stray mark, page number,
+or printed artifact with nothing handwritten to transcribe, return exactly one
+segment with markdown, title and slug set to "", tags set to [], and keyword,
+date_raw, date_iso set to null. Do not invent content to fill it.
+
+A page usually holds exactly one journal entry, so usually you return
 exactly one segment. Return more than one ONLY where a horizontal divider drawn
 on the page is followed by a NEW DATE. A divider on its own does not start a new
 entry: keep the text on both sides of it in the same segment, and transcribe the
@@ -1111,6 +1116,18 @@ def main() -> int:
             for note in [assemble_note(r) for r in
                          resolve_dates(group_segments(segments), scan_date,
                                        item.get("seed"))]:
+                if not note["body"].strip():
+                    # A blank page: transcribed, but nothing was on it. No note,
+                    # no image copy - writing either would just be clutter to
+                    # clean up later, and the page still counts as done below.
+                    span = page_span(note["pages"])
+                    results.append({
+                        "src": f"{path.name} p{span}" if multi else path.name,
+                        "out": "-", "date": "-", "status": "blank",
+                        "note": "no text on the page",
+                    })
+                    print(f"      (blank page{f' {span}' if multi else ''}, no note written)")
+                    continue
                 md_path, img_paths = claim_names(md_dir, img_dir, note["date"], note["slug"],
                                                  len(note["sources"]))
                 note["image_names"] = [p.name for p in img_paths]
@@ -1171,8 +1188,10 @@ def main() -> int:
     print("-" * 78)
 
     ok = sum(1 for r in results if r["status"] == "ok")
-    failed = len(results) - ok
-    print(f"{ok} note(s) written, {failed} failed, {len(skipped)} skipped"
+    blank = sum(1 for r in results if r["status"] == "blank")
+    failed = sum(1 for r in results if r["status"] == "FAILED")
+    print(f"{ok} note(s) written, {blank} blank page(s) skipped, {failed} failed, "
+          f"{len(skipped)} skipped"
           + (f"  (~${total_cost:.2f} of subscription usage)" if total_cost else ""))
     print(f"Output: {out_dir}")
     return 1 if failed else 0

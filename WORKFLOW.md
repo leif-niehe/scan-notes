@@ -47,8 +47,11 @@ flowchart TD
     E --> I["group_segments<br/>fold continuations into one note"]
     I --> J["resolve_dates<br/>see diagram 4"]
     J --> K["assemble_note<br/>join pages, merge tags,<br/>keep one image per page"]
-    K --> L["claim_names and build_note<br/>write the .md into Markdown/,<br/>copy the page images into JPEG/"]
+    K --> K2{"any text in the note?"}
+    K2 -->|"yes"| L["claim_names and build_note<br/>write the .md into Markdown/,<br/>copy the page images into JPEG/"]
+    K2 -->|"no - blank page(s)"| K3["write nothing, copy no image<br/>logged as a blank page, not a failure"]
     L --> M["save_manifest<br/>a log, never the source of truth"]
+    K3 --> M
 ```
 
 A page that fails is logged and skipped; the rest of the file carries on. The
