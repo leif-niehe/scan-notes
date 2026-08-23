@@ -43,11 +43,15 @@ SOURCE_EXTS = IMAGE_EXTS | PDF_EXTS
 MAX_BACKDATE_DAYS = 5 * 365
 CALL_TIMEOUT_S = 300
 
-# PDF pages are rasterised to this long edge. The model downsamples below this
-# anyway; the headroom is for re-transcribing against a better model later, and
-# for Leif reading the archived page himself rather than the transcription.
-PDF_LONG_EDGE_PX = 3400
-PDF_JPEG_QUALITY = 95
+# Every page image this script writes - a rasterised PDF page, a converted HEIC,
+# an EXIF-rotated photo - is saved at this long edge. It is the largest image any
+# current Claude model reads; anything bigger is downsampled before the model
+# sees it, so extra pixels cost storage and buy nothing, now or on a re-transcribe
+# later, and it is still ample for reading the archived page by eye. Quality 85 is
+# indistinguishable from 95 on handwriting and roughly halves the file; 95 also
+# switches off JPEG colour subsampling, a large size premium for no visible gain.
+ARCHIVE_LONG_EDGE_PX = 2576
+ARCHIVE_JPEG_QUALITY = 85
 
 CLAUDE_FALLBACKS = [
     Path.home() / ".local" / "bin" / "claude.exe",
@@ -354,7 +358,8 @@ def prepare_image(src: Path, workdir: Path) -> tuple[Path, str | None]:
     """Normalise orientation and convert HEIC. Returns (path_to_use, note).
 
     Returns the untouched source when no work is needed, so ordinary JPEGs are
-    never re-encoded.
+    never re-encoded. When we do have to re-encode, the result is written at the
+    same long edge and quality as a rasterised PDF page.
     """
     ext = src.suffix.lower()
     is_heic = ext in {".heic", ".heif"}
@@ -381,8 +386,14 @@ def prepare_image(src: Path, workdir: Path) -> tuple[Path, str | None]:
             fixed = ImageOps.exif_transpose(im)
             if fixed.mode not in ("RGB", "L"):
                 fixed = fixed.convert("RGB")
+            long_edge = max(fixed.size)
+            if long_edge > ARCHIVE_LONG_EDGE_PX:
+                scale = ARCHIVE_LONG_EDGE_PX / long_edge
+                fixed = fixed.resize(
+                    (round(fixed.width * scale), round(fixed.height * scale)),
+                    Image.LANCZOS)
             out = workdir / (src.stem + ".jpg")
-            fixed.save(out, "JPEG", quality=92)
+            fixed.save(out, "JPEG", quality=ARCHIVE_JPEG_QUALITY)
         return out, ("converted from HEIC" if is_heic else "rotated via EXIF")
     except Exception as e:  # noqa: BLE001 - a bad image must not kill the run
         return src, f"image preprocessing failed ({e}), using original"
@@ -431,11 +442,11 @@ def render_pdf_pages(src: Path, workdir: Path,
                 continue
             page = doc.load_page(i)
             long_edge = max(page.rect.width, page.rect.height) or 1
-            zoom = min(max(PDF_LONG_EDGE_PX / long_edge, 0.5), 6.0)
+            zoom = min(max(ARCHIVE_LONG_EDGE_PX / long_edge, 0.5), 6.0)
             pix = page.get_pixmap(matrix=pm.Matrix(zoom, zoom))
             dest = workdir / f"{slugify(src.stem, 12)}_p{n:03d}.jpg"
             try:
-                pix.pil_save(dest, format="JPEG", quality=PDF_JPEG_QUALITY)
+                pix.pil_save(dest, format="JPEG", quality=ARCHIVE_JPEG_QUALITY)
             except Exception:  # noqa: BLE001 - Pillow missing or unhappy
                 dest = dest.with_suffix(".png")
                 pix.save(dest)

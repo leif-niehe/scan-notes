@@ -33,7 +33,9 @@ My Drive/Scanned_20260819-1500.pdf        (9 pages, 5 reflections)
 ```
 
 The original stays untouched in the Drive root. Clear it out by hand whenever you
-like — the archive no longer depends on it.
+like — the archive no longer depends on it. Worth actually doing: a scanning
+session comes off the scanner at full colour and resolution, so one 44-page PDF
+runs to well over 100 MB — more than the entire archive of pages it produces.
 
 **Scan as PDF, always** — one file per scanning session, however many pages are
 in it. A one-page PDF produces exactly what a JPEG does, and scanning a batch as
@@ -269,11 +271,22 @@ set in the environment.
   drifting between `ai-prompting` and `ai-prompts`.
 - **Filenames that don't match `Scanned_YYYYMMDD-HHMM` are skipped**, not
   date-guessed, and reported in the summary.
-- **PDF pages are rendered, not pulled out.** Rendering at ~3400px on the long
-  edge stays correct when a scanner splits one page into several images, and the
-  model sees exactly what gets archived beside the note.
-- **The archived `.jpg` is the normalised image** — EXIF-rotated, HEIC converted.
-  The pristine original stays in the Drive root.
+- **PDF pages are rendered, not pulled out.** Rendering stays correct when a
+  scanner splits one page into several images, and the model sees exactly what
+  gets archived beside the note.
+- **Pages are archived at 2576px on the long edge, JPEG quality 85.** That is
+  the largest image any current Claude model reads — a bigger file is
+  downsampled before the model ever sees it, so the extra pixels would cost
+  storage without helping the transcription now or a re-run later, and it is
+  still far more than enough to read the page by eye. Quality 85 is
+  indistinguishable from 95 on handwriting at roughly half the size. Together
+  these put a scanned page at about 0.5 MB instead of 1.4 MB. The two numbers
+  are `ARCHIVE_LONG_EDGE_PX` and `ARCHIVE_JPEG_QUALITY` at the top of
+  [notes.py](notes.py).
+- **The archived `.jpg` is the normalised image** — EXIF-rotated, HEIC
+  converted, downscaled. An ordinary JPEG that needs none of that is copied
+  as-is rather than re-encoded, so a plain photo is archived at whatever size it
+  arrived at. The pristine original stays in the Drive root.
 - **Failures are per-page.** One bad page is logged and skipped; the rest of its
   file, and the run, carry on, and the summary shows what happened.
 

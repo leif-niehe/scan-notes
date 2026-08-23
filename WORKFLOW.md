@@ -27,7 +27,8 @@ flowchart TD
 ```
 
 Nothing is ever deleted or moved. The original scan stays in the Drive root
-until you clear it out by hand.
+until you clear it out by hand — worth doing, as a full scanning session is
+typically larger than every archived page it produces put together.
 
 ---
 
@@ -36,8 +37,8 @@ until you clear it out by hand.
 ```mermaid
 flowchart TD
     A["a source file and<br/>the pages still to do"] --> B{"PDF?"}
-    B -->|"yes"| C["render_pdf_pages<br/>rasterise each page to JPEG<br/>at ~3400px on the long edge"]
-    B -->|"no"| D["prepare_image<br/>EXIF rotation, HEIC conversion"]
+    B -->|"yes"| C["render_pdf_pages<br/>rasterise each page to JPEG<br/>at 2576px on the long edge, quality 85"]
+    B -->|"no"| D["prepare_image<br/>EXIF rotation, HEIC conversion,<br/>downscale to 2576px if re-encoding"]
     C --> E["for each page, in order"]
     D --> E
     E --> F["context_for<br/>the title, closing lines and year<br/>of the page before this one"]
@@ -190,6 +191,8 @@ changes, update it in the same commit:
   [README.md](README.md), which must not contradict each other
 - a new input format, flag, or output file → **diagram 1**, **diagram 2**, or
   **What ends up on disk**
+- a change to the size or quality archived pages are written at → **diagram 2**
+  and the archiving bullet in [README.md](README.md)
 
 If a change makes a diagram wrong and there is no time to redraw it, delete the
 diagram rather than leave it lying. A stale map is worse than no map.
