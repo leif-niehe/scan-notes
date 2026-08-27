@@ -1,5 +1,6 @@
 {
   "_comment": "Copy to config.json and fill in the paths for THIS machine. Forward slashes work on Windows too.",
   "drive_root": "H:/My Drive",
+  "output_subpath": "Notes/Handwritten",
   "claude_bin": ""
 }

@@ -14,7 +14,7 @@ render it without a build step.
 ```mermaid
 flowchart TD
     A["Scan a session to the Drive root<br/>Scanned_YYYYMMDD-HHMM.pdf"] --> B["python notes.py"]
-    B --> D["load_config and find_claude<br/>this machine's Drive path, the CLI,<br/>a warning if ANTHROPIC_API_KEY is set"]
+    B --> D["load_config and find_claude<br/>this machine's Drive path and output folder,<br/>the CLI, a warning if ANTHROPIC_API_KEY is set"]
     D --> E["Read the output folder<br/>which pages already have notes,<br/>which tags already exist"]
     E --> F["build_queue<br/>one entry per source, listing only<br/>the pages no note covers yet"]
     F --> G{"--limit N given?"}
@@ -155,7 +155,7 @@ Swapping model provider means rewriting `transcribe` and nothing else.
 ```
 My Drive/
 ├── Scanned_20260819-1500.pdf              the original, untouched
-└── 02_Areas/Personal/Reflection AI automated/
+└── <output_subpath>/                       from config.json
     ├── Markdown/
     │   ├── 2026-07-26_relaxed-productivity.md      one reflection, pages 1-3
     │   └── 2026-08-02_reading-notes.md             next reflection, page 4

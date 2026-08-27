@@ -3,7 +3,7 @@
 
 Manual trigger: run it when you're at a machine that syncs Drive.
 Reads  <drive_root>/Scanned_*.{jpg,png,heic,pdf}
-Writes <drive_root>/02_Areas/Personal/Reflection AI automated/
+Writes <drive_root>/<output_subpath>/, both set in config.json
 
 A single image is one page. A PDF is a stack of pages that may hold several
 reflections; each reflection becomes its own note.
@@ -29,7 +29,6 @@ REPO = Path(__file__).resolve().parent
 CONFIG = REPO / "config.json"
 CONFIG_EXAMPLE = REPO / "config.example.json"
 
-OUTPUT_SUBPATH = "02_Areas/Personal/Reflection AI automated"
 MD_SUBDIR = "Markdown"
 IMG_SUBDIR = "JPEG"
 MANIFEST_NAME = "_manifest.json"
@@ -68,14 +67,18 @@ CLAUDE_FALLBACKS = [
 SETUP_HELP = """\
 No config.json found.
 
-This repo needs to know where Google Drive is mounted on THIS machine, which
-differs per machine. That path is deliberately not committed.
+This repo needs to know where Google Drive is mounted on THIS machine, and
+which folder inside it the notes belong in. Neither is committed: the mount
+path differs per machine, and where you file your own notes is nobody's
+business but yours.
 
   1. Copy config.example.json to config.json
   2. Set "drive_root" to this machine's My Drive path
        Windows : "H:/My Drive"
        macOS   : "/Users/you/Library/CloudStorage/GoogleDrive-you@gmail.com/My Drive"
-  3. Run again
+  3. Set "output_subpath" to the folder inside it that the notes go in,
+     e.g. "Notes/Handwritten" - it is created if it doesn't exist
+  4. Run again
 
 config.json is gitignored, so this is a one-time step per machine.
 """
@@ -96,6 +99,18 @@ def load_config() -> dict:
     cfg["drive_root"] = Path(root).expanduser()
     if not cfg["drive_root"].is_dir():
         sys.exit(f"drive_root does not exist: {cfg['drive_root']}\nIs Google Drive running?")
+
+    # Deliberately no default. Falling back to some guessed folder would send a
+    # run to an empty directory, where nothing looks processed yet, and quietly
+    # re-transcribe an archive that already exists.
+    sub = cfg.get("output_subpath", "").strip().strip("/\\")
+    if not sub:
+        sys.exit('config.json is missing "output_subpath" - the folder inside '
+                 'drive_root that the notes go in, e.g. "Notes/Handwritten".')
+    parts = [p for p in re.split(r"[/\\]+", sub) if p]
+    if any(p == ".." for p in parts) or Path(sub).is_absolute():
+        sys.exit(f'"output_subpath" must be a folder inside drive_root: {sub}')
+    cfg["output_subpath"] = Path(*parts)
     return cfg
 
 
@@ -1013,7 +1028,7 @@ def main() -> int:
     check_billing()
 
     drive_root: Path = cfg["drive_root"]
-    out_dir = drive_root / OUTPUT_SUBPATH
+    out_dir = drive_root / cfg["output_subpath"]
     md_dir = out_dir / MD_SUBDIR
     img_dir = out_dir / IMG_SUBDIR
     md_dir.mkdir(parents=True, exist_ok=True)

@@ -11,12 +11,12 @@ read it.
 
 ```
 My Drive/Scanned_20260811-2108.jpg
-        -> .../Reflection AI automated/Markdown/2026-07-01_relaxed-productivity-ai-prompts.md
-        -> .../Reflection AI automated/JPEG/2026-07-01_relaxed-productivity-ai-prompts.jpg
+        -> <output_subpath>/Markdown/2026-07-01_relaxed-productivity-ai-prompts.md
+        -> <output_subpath>/JPEG/2026-07-01_relaxed-productivity-ai-prompts.jpg
 ```
 
 The note (`.md`) always goes in a `Markdown/` subfolder and its page image(s) in
-a `JPEG/` subfolder, both inside `Reflection AI automated/` — kept apart so
+a `JPEG/` subfolder, both inside the output folder — kept apart so
 skimming one kind of file doesn't mean scrolling past the other.
 
 A PDF works the same way, except that it holds a stack of pages and comes out as
@@ -45,8 +45,9 @@ and are still tested; there is just no reason to reach for them.
 ## Setup on a new machine
 
 Google Drive for Desktop mounts `My Drive` at a different path on every machine,
-so that path lives in `config.json`, which is gitignored. Only the example is
-committed.
+so that path lives in `config.json`, which is gitignored — along with the folder
+you file the notes in, which is your business and not the repo's. Only the
+example is committed.
 
 1. Install [Google Drive for Desktop](https://www.google.com/drive/download/) and
    let `My Drive` finish syncing.
@@ -67,6 +68,7 @@ reported as skipped with the install line as the reason.
 | key | meaning |
 |---|---|
 | `drive_root` | This machine's `My Drive` path. Windows: `"H:/My Drive"`. macOS: `"/Users/you/Library/CloudStorage/GoogleDrive-you@gmail.com/My Drive"` |
+| `output_subpath` | Folder inside `drive_root` where notes and images go, e.g. `"Notes/Handwritten"`. Created if missing. No default — a wrong guess here would look like an empty archive and re-transcribe everything. |
 | `claude_bin` | Full path to the `claude` executable. Leave `""` if it's on your PATH. |
 
 `claude_bin` exists because the Windows installer puts `claude` in
@@ -293,3 +295,7 @@ set in the environment.
 Because the image is kept beside the note, the whole archive can be
 re-transcribed against a better model later. Delete the manifest, or use
 `--force`, and run it again.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
