@@ -157,12 +157,12 @@ My Drive/
 ├── Scanned_20260819-1500.pdf              the original, untouched
 └── <output_subpath>/                       from config.json
     ├── Markdown/
-    │   ├── 2026-07-26_relaxed-productivity.md      one reflection, pages 1-3
+    │   ├── 2026-07-26_three-things-to-stop.md      one reflection, pages 1-3
     │   └── 2026-08-02_reading-notes.md             next reflection, page 4
     ├── JPEG/
-    │   ├── 2026-07-26_relaxed-productivity.jpg     page 1
-    │   ├── 2026-07-26_relaxed-productivity_p2.jpg  page 2
-    │   ├── 2026-07-26_relaxed-productivity_p3.jpg  page 3
+    │   ├── 2026-07-26_three-things-to-stop.jpg     page 1
+    │   ├── 2026-07-26_three-things-to-stop_p2.jpg  page 2
+    │   ├── 2026-07-26_three-things-to-stop_p3.jpg  page 3
     │   └── 2026-08-02_reading-notes.jpg
     └── _manifest.json                          the run log, one level up
 ```

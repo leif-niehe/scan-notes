@@ -11,8 +11,8 @@ read it.
 
 ```
 My Drive/Scanned_20260811-2108.jpg
-        -> <output_subpath>/Markdown/2026-07-01_relaxed-productivity-ai-prompts.md
-        -> <output_subpath>/JPEG/2026-07-01_relaxed-productivity-ai-prompts.jpg
+        -> <output_subpath>/Markdown/2026-07-01_week-in-review.md
+        -> <output_subpath>/JPEG/2026-07-01_week-in-review.jpg
 ```
 
 The note (`.md`) always goes in a `Markdown/` subfolder and its page image(s) in
@@ -24,10 +24,10 @@ one note per reflection rather than one note per file:
 
 ```
 My Drive/Scanned_20260819-1500.pdf        (9 pages, 5 reflections)
-        -> .../Markdown/2026-07-26_relaxed-productivity.md       (pages 1-3)
-        -> .../JPEG/2026-07-26_relaxed-productivity.jpg
-        -> .../JPEG/2026-07-26_relaxed-productivity_p2.jpg
-        -> .../JPEG/2026-07-26_relaxed-productivity_p3.jpg
+        -> .../Markdown/2026-07-26_three-things-to-stop.md       (pages 1-3)
+        -> .../JPEG/2026-07-26_three-things-to-stop.jpg
+        -> .../JPEG/2026-07-26_three-things-to-stop_p2.jpg
+        -> .../JPEG/2026-07-26_three-things-to-stop_p3.jpg
         -> .../Markdown/2026-08-02_reading-notes.md              (page 4)
         ...
 ```
@@ -98,18 +98,18 @@ rasterised and sent on its own, so a 9-page PDF costs nine pages, not more.
 Content first, metadata at the bottom.
 
 ```markdown
-# Relaxed productivity — fewer, better AI prompts
+# What I want from the next quarter
 
 The transcription, preserving the structure of the page.
 
 - unreadable words marked like [?Vorlesung]
 
 ---
-tags: journal, productivity, ai-prompts
+tags: journal, planning, goals
 date_on_page: 2026-07
-scan: 2026-07-01_relaxed-productivity.jpg, 2026-07-01_relaxed-productivity_p2.jpg
+scan: 2026-07-01_next-quarter-goals.jpg, 2026-07-01_next-quarter-goals_p2.jpg
 pages: 2-3 of 9
-original: Scanned_20260819-1500.pdf
+original: Scanned_20260715-1030.pdf
 ```
 
 `scan:` names the image files, not their path — they sit in the sibling `JPEG/`
