@@ -33,7 +33,9 @@ My Drive/Scanned_20260819-1500.pdf        (9 pages, 5 reflections)
 ```
 
 The original stays untouched in the Drive root. Clear it out by hand whenever you
-like — the archive no longer depends on it. Worth actually doing: a scanning
+like — the notes and their page images no longer depend on it. (The one thing
+that does need it is reading a scan again with `--force`; see the flags below.)
+Worth actually doing: a scanning
 session comes off the scanner at full colour and resolution, so one 44-page PDF
 runs to well over 100 MB — more than the entire archive of pages it produces.
 
@@ -69,11 +71,16 @@ reported as skipped with the install line as the reason.
 |---|---|
 | `drive_root` | This machine's `My Drive` path. Windows: `"H:/My Drive"`. macOS: `"/Users/you/Library/CloudStorage/GoogleDrive-you@gmail.com/My Drive"` |
 | `output_subpath` | Folder inside `drive_root` where notes and images go, e.g. `"Notes/Handwritten"`. Created if missing. No default — a wrong guess here would look like an empty archive and re-transcribe everything. |
-| `claude_bin` | Full path to the `claude` executable. Leave `""` if it's on your PATH. |
+| `claude_bin` | Full path to the `claude` executable. Leave `""` to have it found automatically. |
 
 `claude_bin` exists because the Windows installer puts `claude` in
 `~/.local/bin`, which is often not on PATH in a non-interactive shell. If
-`python notes.py` reports it can't find the CLI, set this.
+`python notes.py` reports it can't find the CLI, set this. Avoid a path with a
+version number in it (the Claude desktop app keeps its copy in one): an update
+removes that folder. If the configured path has gone missing, the script says so
+and looks in the usual places instead of stopping.
+
+On Windows, if `python` only opens the Microsoft Store, use `py notes.py`.
 
 Running with no `config.json` prints these instructions and exits cleanly.
 
@@ -87,7 +94,7 @@ python notes.py
 |---|---|
 | `--dry-run` | List what would be processed. Calls nothing, writes nothing. |
 | `--limit N` | Process at most N **pages**. Use it to work through a backlog without spending your weekly rate limit in one go. It will stop part way through a PDF; the next run picks up at the first page no note covers. |
-| `--force` | Reprocess sources already recorded as done. |
+| `--force` | Read again every scan still in the Drive root, even if already done. The notes it replaces are moved, with their page images, to `_replaced/<date-time>/` inside the output folder, so nothing is duplicated and nothing is lost — delete that folder once you're happy with the new ones. |
 | `--model` | Override the model, e.g. `--model opus`. |
 
 Roughly 20 seconds and ~8k tokens per page, PDF pages included: every page is
@@ -145,8 +152,17 @@ note. Where one ends and the next begins is read off the pages themselves:
   in one note and the line is transcribed as `***` — *unless* a new date follows
   it. A date always starts a new reflection, so such a page becomes two notes.
 
+- **A blank page in the middle of a reflection does not cut it in two.** The
+  page after it is shown the last page that had writing on it, so the empty
+  backs of single-sided sheets scanned double-sided are looked straight through.
+- **A page that failed to read does cut it.** Nothing joins across a page that
+  is missing, so that page can be read on a later run without being mistaken
+  for part of a note that already exists.
+
 Pages inside one note are joined with a blank line, except where a page resumes
-mid-sentence, which is joined with a space.
+mid-sentence, which is joined with a space. The model says whether a page
+resumes mid-sentence, since a German sentence often resumes on a capitalised
+noun and can't be told from a new one by its first letter.
 
 ## Blank pages, and pages with no text
 
@@ -219,11 +235,11 @@ machines travel through Drive:
 - **The notes themselves.** The authoritative answer to "has this page been
   processed" is whether any `.md` in `Markdown/` carries its filename on an
   `original:` line — and for a multi-page source, whether some note's `pages:`
-  line covers that page number. A PDF stopped part way through by `--limit` or
-  Ctrl-C resumes at its first uncovered page, and reads the date it should carry
+  line covers that page number. A PDF stopped part way through by `--limit`
+  resumes at its first uncovered page, and reads the date it should carry
   forward back out of the notes the earlier run wrote, so a split run dates its
-  notes exactly as an uninterrupted one would. The only cost of stopping mid
-  file is that a reflection straddling the break comes out as two notes.
+  notes exactly as an uninterrupted one would. The only cost is that a
+  reflection straddling the break comes out as two notes.
 
 If an older run left notes and images loose directly in the output folder
 (from before `Markdown/`/`JPEG/` existed), the next run moves them into place
@@ -233,8 +249,26 @@ That second check is the one that matters. A single JSON file written by two
 machines is exactly what Drive resolves by making a conflicted copy, silently
 dropping one side's entries. Reading the output folder can't be lost that way, so
 the manifest is a cache and a log, never the source of truth. It's also re-read
-and merged immediately before every write, and written after every page, so an
-interrupted run keeps its progress.
+and merged immediately before every write, and written once per source file,
+after that file's notes exist.
+
+The one thing the manifest alone remembers is a page that produced no note: a
+blank page, or a note you deleted on purpose. Those stay done because the
+manifest says so. Lose the manifest and they are simply read again.
+
+## Stopping part way, and things going wrong
+
+- **Ctrl-C in the middle of a PDF loses nothing.** The notes for a file are
+  written once its pages have all been read, but each page's transcription is
+  saved the moment it arrives, in a `.page-cache/` folder next to the script.
+  The next run reuses those instead of reading the pages again, then deletes
+  them once the notes exist. That folder is per-machine and gitignored — it
+  holds the text of your notes — so finish an interrupted run on the machine
+  that started it.
+- **Three pages failing in a row stops the run.** That pattern means the
+  connection, the login or the rate limit, not the pages, and carrying on would
+  only wait out a five-minute timeout on every page left. Notes for the pages
+  already read are written, and the next run picks up the rest.
 
 ## Swapping the model provider
 
@@ -287,16 +321,32 @@ set in the environment.
   these put a scanned page at about 0.5 MB instead of 1.4 MB. The two numbers
   are `ARCHIVE_LONG_EDGE_PX` and `ARCHIVE_JPEG_QUALITY` at the top of
   [notes.py](notes.py).
-- **The archived `.jpg` is the normalised image** — EXIF-rotated, HEIC
+- **The archived `.jpg` is the normalised image** — EXIF-rotated, HEIC or PNG
   converted, downscaled. An ordinary JPEG that needs none of that is copied
   as-is rather than re-encoded, so a plain photo is archived at whatever size it
   arrived at. The pristine original stays in the Drive root.
+- **The model only sees a scratch folder.** Every page image is put in a
+  temporary folder first, and that folder is all the model is allowed to read —
+  never the Drive itself.
 - **Failures are per-page.** One bad page is logged and skipped; the rest of its
-  file, and the run, carry on, and the summary shows what happened.
+  file, and the run, carry on, and the summary shows what happened. Three in a
+  row stop the run — see above.
 
-Because the image is kept beside the note, the whole archive can be
-re-transcribed against a better model later. Delete the manifest, or use
-`--force`, and run it again.
+To read a scan again against a better model later, keep the original in the
+Drive root and run with `--force`. The page images kept beside the notes are
+for your eyes; the script does not yet read them back in, so a scan whose
+original you have deleted cannot be re-read this way.
+
+## Tests
+
+```bash
+python -m unittest discover tests -v
+```
+
+They run in about a second, offline and for free: the one function that calls
+the model is swapped for a stand-in, and everything is written to a temporary
+folder. They cover joining pages into reflections, dates, resuming, failures
+and `--force`.
 
 ## License
 

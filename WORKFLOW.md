@@ -26,7 +26,9 @@ flowchart TD
     K --> L["Print the summary table<br/>source, date, status, output"]
 ```
 
-Nothing is ever deleted or moved. The original scan stays in the Drive root
+Nothing is ever deleted. The one thing that is ever moved is a note that
+`--force` replaces, which goes to `_replaced/` with its page images rather than
+being overwritten. The original scan stays in the Drive root
 until you clear it out by hand — worth doing, as a full scanning session is
 typically larger than every archived page it produces put together.
 
@@ -38,14 +40,23 @@ typically larger than every archived page it produces put together.
 flowchart TD
     A["a source file and<br/>the pages still to do"] --> B{"PDF?"}
     B -->|"yes"| C["render_pdf_pages<br/>rasterise each page to JPEG<br/>at 2576px on the long edge, quality 85"]
-    B -->|"no"| D["prepare_image<br/>EXIF rotation, HEIC conversion,<br/>downscale to 2576px if re-encoding"]
+    B -->|"no"| D["prepare_image<br/>EXIF rotation, HEIC or PNG conversion,<br/>downscale to 2576px if re-encoding,<br/>always into a scratch folder"]
     C --> E["for each page, in order"]
     D --> E
-    E --> F["context_for<br/>the title, closing lines and year<br/>of the page before this one"]
-    F --> G["transcribe<br/>one CLI call per page,<br/>Read tool only, ~8k tokens"]
-    G --> H["one or more entries<br/>see diagram 3"]
+    E --> F["context_for<br/>the title, closing lines and year of the<br/>last page with writing on it - nothing<br/>if a page in between failed"]
+    F --> F2{"load_cached_page:<br/>did an interrupted run<br/>already read this page?"}
+    F2 -->|"yes"| H["one or more entries<br/>see diagram 3"]
+    F2 -->|"no"| G["transcribe<br/>one CLI call per page,<br/>Read tool only, ~8k tokens"]
+    G -->|"read"| G2["save_cached_page<br/>kept until this file's notes exist"]
+    G2 --> H
+    G -->|"failed"| G3{"third failure<br/>in a row?"}
+    G3 -->|"no - skip this page"| E
+    G3 -->|"yes - stop reading,<br/>write what there is,<br/>then end the run"| I0
     H --> E
-    E --> I["group_segments<br/>fold continuations into one note"]
+    E --> I0{"--force given?"}
+    I0 -->|"yes"| I1["set_aside_old_notes<br/>move the notes being replaced,<br/>and their images, to _replaced/"]
+    I0 -->|"no"| I
+    I1 --> I["group_segments<br/>fold continuations into one note"]
     I --> J["resolve_dates<br/>see diagram 4"]
     J --> K["assemble_note<br/>join pages, merge tags,<br/>keep one image per page"]
     K --> K2{"any text in the note?"}
@@ -55,12 +66,20 @@ flowchart TD
     K4 -->|"yes - a drawing, mark,<br/>or bleed-through"| L
     L --> M["save_manifest<br/>a log, never the source of truth"]
     K3 --> M
+    M --> N["clear_cached_pages<br/>the saved pages have done their job"]
 ```
 
-A page that fails is logged and skipped; the rest of the file carries on. The
-notes for a file are written once all its queued pages are done, so stopping
-mid-file loses at most that one file's transcriptions — and the next run picks
-those pages back up.
+A page that fails is logged and skipped; the rest of the file carries on. Three
+failures in a row are a different matter - that is the connection, the login or
+the rate limit, not the pages - so the run stops there instead of waiting out a
+timeout on every page left, writes notes for what it did read, and leaves the
+rest for next time.
+
+The notes for a file are written once all its queued pages are done, but each
+page's transcription is saved to `.page-cache/` (beside the script, on this
+machine only) the moment it arrives. Stopping mid-file with Ctrl-C therefore
+loses nothing: the next run reuses the saved pages, reads only the ones still
+missing, and comes out exactly as an uninterrupted run would.
 
 A page with no text is never guessed at, but it isn't always thrown away
 either: `flag_review`, set per page in diagram 3's prompt, tells the two apart.
@@ -78,8 +97,10 @@ flowchart TD
     A["one scanned page"] --> B{"a divider line with<br/>a new date after it?"}
     B -->|"yes"| C["two entries on this page"]
     B -->|"no"| D["one entry; a bare divider<br/>is transcribed as ***"]
-    C --> E{"does the first entry pick up<br/>the thought from the page above?"}
-    D --> E
+    C --> E0{"is there a page above to pick up from?<br/>the last page with writing on it, with<br/>only blank pages in between"}
+    D --> E0
+    E0 -->|"no - first page, or a page<br/>in between failed"| G
+    E0 -->|"yes"| E{"does the first entry pick up<br/>the thought from that page?"}
     E -->|"yes"| H{"enforce_date_boundaries:<br/>does it carry its own date,<br/>different from the last one seen?"}
     E -->|"no, or unsure"| G["starts a new note"]
     H -->|"yes"| G
@@ -90,6 +111,19 @@ flowchart TD
 The bias is deliberate: unsure means *new note*. One reflection split across two
 files is obvious the moment you read them; two reflections welded into one file
 is the mistake you notice months later, if ever.
+
+Two kinds of page sit between the pages of a reflection, and they are treated
+in opposite ways. A page with no text on it - the empty back of a sheet, or a
+drawing kept for review - is looked straight through, so the reflection carries
+on across it as one note. A page that failed to read is a wall: nothing joins
+across it, because a note's `pages:` line is a first-to-last range, and a note
+spanning the failed page would mark it as done and it would never be retried.
+
+When pages are joined, the model also says whether the new page resumes in the
+middle of a sentence (`starts_mid_sentence`). If so, and the page above ended
+without closing punctuation, `join_markdown` joins the two with a space rather
+than a blank line. A lowercase first letter counts as the same signal, but
+can't be relied on alone: a German sentence often resumes on a capitalised noun.
 
 `enforce_date_boundaries` is the hard backstop for that: the model is already
 asked never to treat a dated entry as a continuation, but a misread there would
@@ -132,16 +166,19 @@ Everything is in [notes.py](notes.py), in roughly this order.
 
 | stage | function |
 |---|---|
-| Per-machine paths, CLI location | `load_config`, `find_claude`, `check_billing` |
+| Per-machine paths, CLI location | `load_config`, `find_claude`, `_desktop_app_claude`, `check_billing` |
 | Date from the scan filename | `scan_date_from_name` |
 | Validate a date the model read | `parse_page_date` |
 | Output filenames, collision suffixes | `slugify`, `image_names_for`, `claim_names` |
 | Moving an older flat-layout archive into `Markdown/`/`JPEG/` | `migrate_flat_layout` |
 | Run log, read and merged before every write | `load_manifest`, `save_manifest`, `pages_from_manifest` |
+| Reading a note's metadata back, footer only | `note_footer` |
 | What is already done, and the date to resume with | `pages_already_written`, `carry_seed` |
+| Moving aside the notes a `--force` run replaces | `set_aside_old_notes` |
+| Pages read by an interrupted run, kept until their notes exist | `load_cached_page`, `save_cached_page`, `clear_cached_pages` |
 | Page images in, whatever the source | `wait_until_stable`, `prepare_image`, `render_pdf_pages`, `prepare_pages` |
 | **The only provider-specific code** | `SCHEMA`, `SYSTEM_PROMPT`, `build_prompt`, `transcribe` |
-| Pages into reflections | `context_for`, `enforce_date_boundaries`, `group_segments`, `resolve_dates` |
+| Pages into reflections | `context_for`, `is_empty_segment`, `enforce_date_boundaries`, `group_segments`, `resolve_dates` |
 | Reflections into files | `join_markdown`, `assemble_note`, `build_note` |
 | Tag vocabulary fed back to the model | `collect_known_tags` |
 | Queue, page budget, the run itself | `build_queue`, `apply_limit`, `main` |
@@ -164,8 +201,13 @@ My Drive/
     │   ├── 2026-07-26_three-things-to-stop_p2.jpg  page 2
     │   ├── 2026-07-26_three-things-to-stop_p3.jpg  page 3
     │   └── 2026-08-02_reading-notes.jpg
+    ├── _replaced/                              only after a --force run
+    │   └── 20261115-1630/                      the notes and images it replaced
     └── _manifest.json                          the run log, one level up
 ```
+
+Outside Drive, beside `notes.py`, a `.page-cache/` folder appears while a file
+is part way through being read and disappears once its notes are written.
 
 A note and its images are always in these two subfolders, never loose in the
 folder above them. If an older run left files loose there (from before this
@@ -173,9 +215,10 @@ split existed), the next run moves them into `Markdown/`/`JPEG/` itself, before
 it looks at what's already done — `migrate_flat_layout`, one-time and harmless
 to run more than once.
 
-Because every note keeps an image of every page it covers, the whole archive can
-be re-transcribed against a better model later: delete the manifest, or run with
-`--force`.
+To read a scan again against a better model later, keep its original in the
+Drive root and run with `--force`: the old notes move to `_replaced/` and new
+ones take their names. The page images kept beside each note are there to be
+looked at; the script does not read them back in.
 
 ---
 

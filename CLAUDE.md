@@ -33,6 +33,11 @@ can't be made correct, delete it.
 - The **output folder**, not `_manifest.json`, decides what still needs doing.
   The manifest is a log and a cache; a Drive sync conflict can silently drop half
   of it, so it must never become the source of truth.
+- **Nothing joins across a page that wasn't read.** A note's `pages:` line is a
+  first-to-last range, so a note spanning a failed page would mark that page
+  done for good. Blank pages are fine to span; failed or skipped ones are not.
+- `.page-cache/` holds the text of pages read by an interrupted run. It is
+  gitignored and must stay that way.
 - Dates carry forward **within one scan only**. Pages of one file are assumed to
   be in chronological order; separate uploads are not.
 - Everything provider-specific lives in `transcribe`. Keep it that way, so
@@ -43,3 +48,15 @@ can't be made correct, delete it.
 `transcribe` is the only thing that calls out. Stub it, point `load_config` at a
 temp folder, and `main()` runs end to end offline — that is how the grouping,
 date and resume logic should be exercised.
+
+[tests/test_notes.py](tests/test_notes.py) does exactly that. Run it after any
+change to `notes.py`, and add a test with any change to how pages are grouped,
+dated, resumed or replaced:
+
+```bash
+py -m unittest discover tests -v
+```
+
+What the tests cannot check is the prompt itself — whether the model answers
+the fields in `SCHEMA` the way the code expects. A change to `build_prompt` or
+`SCHEMA` is only proven by reading a real page.

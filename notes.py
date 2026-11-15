@@ -32,6 +32,19 @@ CONFIG_EXAMPLE = REPO / "config.example.json"
 MD_SUBDIR = "Markdown"
 IMG_SUBDIR = "JPEG"
 MANIFEST_NAME = "_manifest.json"
+# Where --force puts the notes it is replacing, so nothing is ever deleted.
+REPLACED_SUBDIR = "_replaced"
+
+# Each page's transcription is saved here the moment it arrives, and removed
+# once the notes for its file are written. A run stopped part way through a
+# file picks these back up instead of paying to read the same pages twice.
+# On this machine only, and gitignored: it holds the text of your notes.
+CACHE_DIR = REPO / ".page-cache"
+
+# This many pages failing one after another means something is wrong with the
+# connection, the login or the rate limit, not with the pages. Stop rather than
+# wait out a timeout on every page still in the queue.
+MAX_CONSECUTIVE_FAILURES = 3
 
 SCAN_RE = re.compile(r"^Scanned_(\d{8})-(\d{4})", re.IGNORECASE)
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".heic", ".heif"}
@@ -114,18 +127,41 @@ def load_config() -> dict:
     return cfg
 
 
+def _desktop_app_claude() -> str | None:
+    """The copy of the CLI the Claude desktop app keeps for itself on Windows,
+    newest first. Its folder name changes with every update, hence the search."""
+    base = os.environ.get("LOCALAPPDATA", "")
+    if not base:
+        return None
+    try:
+        found = sorted(Path(base, "Claude-Data").glob("*/claude-code/*/*/claude.exe"),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        return None
+    return str(found[0]) if found else None
+
+
 def find_claude(cfg: dict) -> str:
     explicit = cfg.get("claude_bin", "").strip()
-    if explicit:
-        if not Path(explicit).exists():
-            sys.exit(f'claude_bin in config.json does not exist: {explicit}')
+    if explicit and Path(explicit).exists():
         return explicit
+
+    # A configured path that has gone missing is usually one with a version
+    # number in it, removed by an update. Look elsewhere before giving up.
     found = shutil.which("claude")
+    if not found:
+        found = next((str(c) for c in CLAUDE_FALLBACKS if c.is_file()), None)
+    if not found:
+        found = _desktop_app_claude()
     if found:
+        if explicit:
+            print(f"!! claude_bin in config.json no longer exists: {explicit}\n"
+                  f"!! Using {found} instead. Update config.json, or set\n"
+                  '!! claude_bin to "" to have it found automatically.\n')
         return found
-    for cand in CLAUDE_FALLBACKS:
-        if cand and cand.exists():
-            return str(cand)
+    if explicit:
+        sys.exit(f"claude_bin in config.json does not exist: {explicit}\n"
+                 "and the `claude` CLI was not found anywhere else.")
     sys.exit(
         "Could not find the `claude` CLI.\n"
         'Add its full path to config.json as "claude_bin".'
@@ -263,6 +299,17 @@ def save_manifest(out_dir: Path, new_entries: dict) -> None:
     os.replace(tmp, p)
 
 
+def note_footer(text: str) -> str:
+    """The metadata block under a note's last `---` line.
+
+    Everything that reads a note back looks only here, so a line in the
+    transcription itself that happens to start with "tags:" or "pages:" is
+    never mistaken for metadata.
+    """
+    return text.rpartition("\n---\n")[2]
+
+
+SCAN_LINE_RE = re.compile(r"^scan:\s*(.+?)\s*$", re.MULTILINE)
 ORIGINAL_RE = re.compile(r"^original:\s*(.+?)\s*$", re.MULTILINE)
 PAGES_RE = re.compile(r"^pages:\s*(\d+)(?:\s*-\s*(\d+))?\s+of\s+(\d+)\s*$", re.MULTILINE)
 
@@ -288,7 +335,7 @@ def pages_already_written(md_dir: Path) -> dict[str, set[int]]:
     seen: dict[str, set[int]] = {}
     for md in md_dir.glob("*.md"):
         try:
-            text = md.read_text(encoding="utf-8")
+            text = note_footer(md.read_text(encoding="utf-8"))
         except OSError:
             continue
         m = ORIGINAL_RE.search(text)
@@ -328,7 +375,7 @@ def carry_seed(md_dir: Path, original: str) -> tuple[dt.date, int] | None:
     best: tuple[dt.date, int, int] | None = None   # date, its page, note's last page
     for md in md_dir.glob("*.md"):
         try:
-            text = md.read_text(encoding="utf-8")
+            text = note_footer(md.read_text(encoding="utf-8"))
         except OSError:
             continue
         m = ORIGINAL_RE.search(text)
@@ -348,6 +395,85 @@ def carry_seed(md_dir: Path, original: str) -> tuple[dt.date, int] | None:
             # note is the more recent one to carry forward from.
             best = (date, first, last)
     return (best[0], best[1]) if best else None
+
+
+def set_aside_old_notes(out_dir: Path, md_dir: Path, img_dir: Path, original: str,
+                        pages: set[int], stamp: str) -> int:
+    """Move the notes a --force run is about to replace, and their page images,
+    into _replaced/<stamp>/. Returns how many notes were moved.
+
+    Without this, re-reading a scan leaves the old note in place and writes the
+    new one beside it with a -2 on the end. Moved, not deleted: an old note may
+    carry corrections made by hand.
+    """
+    dest = out_dir / REPLACED_SUBDIR / stamp
+    moved = 0
+    for md in sorted(md_dir.glob("*.md")):
+        try:
+            footer = note_footer(md.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        m = ORIGINAL_RE.search(footer)
+        if not m or m.group(1) != original:
+            continue
+        p = PAGES_RE.search(footer)
+        covered = (set(range(int(p.group(1)), int(p.group(2) or p.group(1)) + 1))
+                   if p else {1})
+        if not covered & pages:
+            continue
+        dest.mkdir(parents=True, exist_ok=True)
+        s = SCAN_LINE_RE.search(footer)
+        for name in (s.group(1).split(",") if s else []):
+            img = img_dir / name.strip()
+            if name.strip() and img.is_file():
+                shutil.move(str(img), str(dest / img.name))
+        shutil.move(str(md), str(dest / md.name))
+        moved += 1
+    return moved
+
+
+# --------------------------------------------------------------------------
+# pages already read, kept until their notes are written
+# --------------------------------------------------------------------------
+
+def _cache_dir(key: str) -> Path:
+    return CACHE_DIR / re.sub(r"[^A-Za-z0-9._-]+", "_", key)
+
+
+def load_cached_page(key: str, page_no: int, model: str | None) -> dict | None:
+    """What an interrupted run already read off this page, if anything.
+    Ignored when it was read by a different model than this run asks for."""
+    try:
+        data = json.loads((_cache_dir(key) / f"p{page_no:04d}.json")
+                          .read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict) or data.get("model") != (model or ""):
+        return None
+    payload = data.get("payload")
+    if not isinstance(payload, dict) or not payload.get("segments"):
+        return None
+    return payload
+
+
+def save_cached_page(key: str, page_no: int, model: str | None, payload: dict) -> None:
+    try:
+        d = _cache_dir(key)
+        d.mkdir(parents=True, exist_ok=True)
+        tmp = d / f"p{page_no:04d}.json.tmp"
+        tmp.write_text(json.dumps({"model": model or "", "payload": payload}),
+                       encoding="utf-8")
+        os.replace(tmp, d / f"p{page_no:04d}.json")
+    except OSError:
+        pass    # a convenience; failing to save it must not fail the page
+
+
+def clear_cached_pages(key: str) -> None:
+    shutil.rmtree(_cache_dir(key), ignore_errors=True)
+    try:
+        CACHE_DIR.rmdir()       # only succeeds once it is empty
+    except OSError:
+        pass
 
 
 # --------------------------------------------------------------------------
@@ -372,32 +498,45 @@ def wait_until_stable(path: Path, tries: int = 4, pause: float = 2.0) -> bool:
 def prepare_image(src: Path, workdir: Path) -> tuple[Path, str | None]:
     """Normalise orientation and convert HEIC. Returns (path_to_use, note).
 
-    Returns the untouched source when no work is needed, so ordinary JPEGs are
+    Returns an untouched copy when no work is needed, so ordinary JPEGs are
     never re-encoded. When we do have to re-encode, the result is written at the
-    same long edge and quality as a rasterised PDF page.
+    same long edge and quality as a rasterised PDF page. PNG and HEIC are always
+    re-encoded, because every archived page image is saved under a .jpg name.
+
+    Either way the file handed back is inside workdir, never the source itself:
+    the model is given read access to the folder its image is in, and that
+    should be a scratch folder holding only pages, not the whole Drive.
     """
     ext = src.suffix.lower()
     is_heic = ext in {".heic", ".heif"}
+    is_jpeg = ext in {".jpg", ".jpeg"}
+
+    def untouched(note: str | None) -> tuple[Path, str | None]:
+        dest = workdir / src.name
+        shutil.copy2(src, dest)
+        return dest, note
 
     try:
         from PIL import Image, ImageOps
     except ImportError:
         if is_heic:
-            return src, "HEIC needs Pillow: pip install pillow pillow-heif"
-        return src, None
+            return untouched("HEIC needs Pillow: pip install pillow pillow-heif")
+        if not is_jpeg:
+            return untouched("PNG needs Pillow to be archived as a JPEG: pip install pillow")
+        return untouched(None)
 
     if is_heic:
         try:
             import pillow_heif
             pillow_heif.register_heif_opener()
         except ImportError:
-            return src, "HEIC needs pillow-heif: pip install pillow-heif"
+            return untouched("HEIC needs pillow-heif: pip install pillow-heif")
 
     try:
         with Image.open(src) as im:
             orientation = (im.getexif() or {}).get(0x0112, 1)
-            if not is_heic and orientation in (1, 0):
-                return src, None
+            if is_jpeg and orientation in (1, 0):
+                return untouched(None)
             fixed = ImageOps.exif_transpose(im)
             if fixed.mode not in ("RGB", "L"):
                 fixed = fixed.convert("RGB")
@@ -407,11 +546,12 @@ def prepare_image(src: Path, workdir: Path) -> tuple[Path, str | None]:
                 fixed = fixed.resize(
                     (round(fixed.width * scale), round(fixed.height * scale)),
                     Image.LANCZOS)
-            out = workdir / (src.stem + ".jpg")
+            out = workdir / (src.name + ".jpg")
             fixed.save(out, "JPEG", quality=ARCHIVE_JPEG_QUALITY)
-        return out, ("converted from HEIC" if is_heic else "rotated via EXIF")
+        return out, ("converted from HEIC" if is_heic else
+                     "rotated via EXIF" if is_jpeg else "converted to JPEG")
     except Exception as e:  # noqa: BLE001 - a bad image must not kill the run
-        return src, f"image preprocessing failed ({e}), using original"
+        return untouched(f"image preprocessing failed ({e}), using original")
 
 
 def _pymupdf():
@@ -489,6 +629,7 @@ SEGMENT_SCHEMA = {
     "type": "object",
     "properties": {
         "continues_previous": {"type": "boolean"},
+        "starts_mid_sentence": {"type": "boolean"},
         "title": {"type": "string"},
         "markdown": {"type": "string"},
         "slug": {"type": "string"},
@@ -498,7 +639,7 @@ SEGMENT_SCHEMA = {
         "date_iso": {"type": ["string", "null"]},
         "flag_review": {"type": "boolean"},
     },
-    "required": ["continues_previous", "title", "markdown", "slug", "tags",
+    "required": ["continues_previous", "starts_mid_sentence", "title", "markdown", "slug", "tags",
                  "keyword", "date_raw", "date_iso", "flag_review"],
     "additionalProperties": False,
 }
@@ -536,9 +677,10 @@ def build_prompt(image: Path, scan_date: dt.date, known_tags: list[str],
 
     where = ""
     previous = ""
+    alone = "starts_mid_sentence\n  Always false.\n\n"
     continues_rule = (
         "continues_previous\n"
-        "  Always false. This page stands alone.\n\n"
+        "  Always false. This page stands alone.\n\n" + alone
     )
 
     if ctx:
@@ -560,11 +702,15 @@ def build_prompt(image: Path, scan_date: dt.date, known_tags: list[str],
                 "  thought under the same heading. False when it starts something new.\n"
                 "  An entry that carries its own new date is never a continuation.\n"
                 "  When genuinely unsure, answer false.\n\n"
+                "starts_mid_sentence\n"
+                "  True only when continues_previous is true AND this entry's first\n"
+                "  words finish a sentence that the last lines above left unfinished.\n"
+                "  False when it opens a new sentence, paragraph, heading or list item.\n\n"
             )
         else:
             continues_rule = (
                 "continues_previous\n"
-                "  Always false: no page of this scan comes before this one.\n\n"
+                "  Always false: this page is being read on its own.\n\n" + alone
             )
 
     year_hint = ""
@@ -712,14 +858,19 @@ BLOCK_START_RE = re.compile(r"^\s*(#{1,6}\s|[-*+]\s|\d+[.)]\s|>|\||\*\*\*|---)")
 OPEN_TAIL_RE = re.compile(r"[\w,;:\-\u2013\u2014]$")
 
 
-def join_markdown(chunks: list[str]) -> str:
+def join_markdown(chunks: list[str], mid_sentence_flags: list[bool] | None = None) -> str:
     """Stitch a note's pages together.
 
     A page that resumes mid-sentence is joined with a space; anything else gets
     a blank line, so a continuation never silently welds two paragraphs.
+
+    "Resumes mid-sentence" needs the page above to end without closing
+    punctuation, and then either the model saying so (mid_sentence_flags, one
+    per chunk) or the page starting with a lowercase letter. The lowercase test
+    alone misses German, where a sentence often resumes on a capitalised noun.
     """
     out = ""
-    for chunk in chunks:
+    for i, chunk in enumerate(chunks):
         chunk = (chunk or "").strip()
         if not chunk:
             continue
@@ -727,10 +878,12 @@ def join_markdown(chunks: list[str]) -> str:
             out = chunk
             continue
         last_line = next((ln for ln in reversed(out.splitlines()) if ln.strip()), "")
+        said_so = bool(mid_sentence_flags and i < len(mid_sentence_flags)
+                       and mid_sentence_flags[i])
         mid_sentence = (
             OPEN_TAIL_RE.search(last_line.rstrip())
             and not BLOCK_START_RE.match(chunk)
-            and chunk[:1].islower()
+            and (said_so or chunk[:1].islower())
         )
         out += (" " if mid_sentence else "\n\n") + chunk
     return out
@@ -768,7 +921,7 @@ def collect_known_tags(md_dir: Path, limit: int = 40) -> list[str]:
     counts: dict[str, int] = {}
     for md in md_dir.glob("*.md"):
         try:
-            m = TAGS_RE.search(md.read_text(encoding="utf-8"))
+            m = TAGS_RE.search(note_footer(md.read_text(encoding="utf-8")))
         except OSError:
             continue
         if not m:
@@ -798,14 +951,28 @@ def enforce_date_boundaries(segments: list[dict]) -> None:
             last_date = cur
 
 
+def is_empty_segment(seg: dict) -> bool:
+    """A page (or entry) with no transcribed text: blank, or flagged for review."""
+    return not (seg.get("markdown") or "").strip()
+
+
 def group_segments(segments: list[dict]) -> list[list[dict]]:
-    """One group per reflection. A group spans pages; a page can start a group."""
+    """One group per reflection. A group spans pages; a page can start a group.
+
+    A page with no text always stands alone, and is looked straight through: an
+    entry that continues does so from the last page that had writing on it, so
+    a blank back-of-sheet in the middle of a reflection does not cut it in two.
+    """
     groups: list[list[dict]] = []
+    target: int | None = None           # the last group that has text in it
     for seg in segments:
-        if groups and seg.get("continues_previous"):
-            groups[-1].append(seg)
+        if is_empty_segment(seg):
+            groups.append([seg])
+        elif target is not None and seg.get("continues_previous"):
+            groups[target].append(seg)
         else:
             groups.append([seg])
+            target = len(groups) - 1
     return groups
 
 
@@ -894,10 +1061,13 @@ def assemble_note(r: dict) -> dict:
         if seg["_page"] not in pages:
             pages.append(seg["_page"])
             images.append(seg["_image"])
+    title = next((s["title"] for s in g if (s.get("title") or "").strip()), "")
+    slug = next((s["slug"] for s in g if (s.get("slug") or "").strip()), "")
     return {
-        "title": g[0].get("title") or "",
-        "body": join_markdown([s.get("markdown") or "" for s in g]),
-        "slug": slugify(g[0].get("slug") or g[0].get("title") or "untitled"),
+        "title": title,
+        "body": join_markdown([s.get("markdown") or "" for s in g],
+                              [bool(s.get("starts_mid_sentence")) for s in g]),
+        "slug": slugify(slug or title or "untitled"),
         "tags": tags[:6],
         "keyword": keyword,
         "flagged": any(seg.get("flag_review") for seg in g),
@@ -912,18 +1082,28 @@ def assemble_note(r: dict) -> dict:
 
 
 def context_for(segments: list[dict], page_no: int, total: int) -> dict:
-    """What page `page_no` needs to know about the page before it."""
+    """What page `page_no` needs to know about the page before it.
+
+    "The page before it" is the last page that had writing on it, provided
+    every page in between was read in this run and came back empty. If a page
+    in between failed, or was not part of this run, nothing is offered to
+    continue from: joining across a gap would write a note whose `pages:` line
+    claims the missing page, and that page would then never be retried.
+    """
     ctx: dict = {"page": page_no, "total": total}
     if not segments:
         return ctx
-    prev = segments[-1]
-    body = (prev.get("markdown") or "").strip()
-    ctx.update({
-        "prev_page": prev["_page"],
-        "prev_title": prev.get("title"),
-        "prev_tail": "\n".join(body.splitlines()[-6:])[-500:],
-        "prev_date_raw": prev.get("date_raw"),
-    })
+    prev = next((s for s in reversed(segments) if not is_empty_segment(s)), None)
+    if prev is not None:
+        empty_pages = {s["_page"] for s in segments if is_empty_segment(s)}
+        if all(n in empty_pages for n in range(prev["_page"] + 1, page_no)):
+            body = (prev.get("markdown") or "").strip()
+            ctx.update({
+                "prev_page": prev["_page"],
+                "prev_title": prev.get("title"),
+                "prev_tail": "\n".join(body.splitlines()[-6:])[-500:],
+                "prev_date_raw": prev.get("date_raw"),
+            })
     for seg in reversed(segments):
         iso = (seg.get("date_iso") or "").strip()
         if re.match(r"^\d{4}", iso):
@@ -943,16 +1123,33 @@ def build_queue(md_dir: Path, candidates: list[Path], done: dict[str, set[int]],
     queue: list[dict] = []
     skipped: list[tuple[str, str]] = []
 
+    # Scans the run log records as finished, by name and size. Recognising one
+    # this way costs nothing; the check further down has to wait two seconds
+    # and read the whole file first, which adds up as old scans pile up in the
+    # Drive root. Entries logged before the size was recorded take the slow way.
+    finished = {
+        (e.get("original"), e.get("size")) for e in manifest.values()
+        if isinstance(e, dict) and e.get("size") and e.get("pages_total")
+        and len(set(e.get("pages_done") or [])) >= e["pages_total"]
+    }
+
     for path in candidates:
         if scan_date_from_name(path.name) is None:
             skipped.append((path.name, "filename has no Scanned_YYYYMMDD-HHMM date"))
             continue
+        if not force:
+            try:
+                if (path.name, path.stat().st_size) in finished:
+                    continue
+            except OSError:
+                pass
         if not wait_until_stable(path):
             skipped.append((path.name, "still syncing, try again later"))
             continue
         key = file_key(path)
         logged = {} if force else manifest.get(key, {})
-        if logged.get("pages_total") and                 len(pages_from_manifest(manifest, key)) >= logged["pages_total"]:
+        if (logged.get("pages_total")
+                and len(pages_from_manifest(manifest, key)) >= logged["pages_total"]):
             continue    # finished earlier; no need to open it, PDF reader or not
 
         try:
@@ -1085,6 +1282,9 @@ def main() -> int:
     results: list[dict] = []
     total_cost = 0.0
     done_pages = 0
+    consecutive_failures = 0
+    stopped_early = False
+    run_stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
 
     with tempfile.TemporaryDirectory(prefix="scan-notes-") as workdir_s:
         workdir = Path(workdir_s)
@@ -1106,6 +1306,7 @@ def main() -> int:
 
             segments: list[dict] = []
             failed_pages: list[int] = []
+            ok_pages: list[int] = []
             usage: list[dict] = []
             file_cost = 0.0
 
@@ -1115,21 +1316,36 @@ def main() -> int:
                 print(f"{label} ... ", end="", flush=True)
                 started = time.time()
                 ctx = context_for(segments, page_no, item["total"]) if multi else None
-                try:
-                    payload = transcribe(image, claude_bin, scan_date, known_tags,
-                                         ctx, args.model)
-                except Exception as e:  # noqa: BLE001 - one bad page, not one bad run
-                    failed_pages.append(page_no)
-                    print(f"FAILED\n        {str(e)[:200]}")
-                    continue
+
+                # A page an interrupted run already read is not read again.
+                payload = None if args.force else load_cached_page(key, page_no, args.model)
+                reused = payload is not None
+                if not reused:
+                    try:
+                        payload = transcribe(image, claude_bin, scan_date, known_tags,
+                                             ctx, args.model)
+                    except Exception as e:  # noqa: BLE001 - one bad page, not one bad run
+                        failed_pages.append(page_no)
+                        consecutive_failures += 1
+                        print(f"FAILED\n        {str(e)[:200]}")
+                        if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                            stopped_early = True
+                            break
+                        continue
+                    consecutive_failures = 0
+                    save_cached_page(key, page_no, args.model, payload)
+                    total_cost += payload.get("_cost_usd") or 0.0
+                ok_pages.append(page_no)
 
                 new = payload["segments"]
+                can_continue = bool(ctx and ctx.get("prev_page"))
                 for i, seg in enumerate(new):
                     seg["_page"] = page_no
                     seg["_image"] = image
                     # Only a page's first entry can continue the page above, and
-                    # nothing can continue when nothing came before it.
-                    if i > 0 or not segments:
+                    # only when there is a page above to continue: not across a
+                    # page that failed, and not when nothing came before it.
+                    if i > 0 or not can_continue:
                         seg["continues_previous"] = False
                     for t in seg.get("tags") or []:
                         t = t.strip().lower()
@@ -1141,14 +1357,24 @@ def main() -> int:
                 usage.append(payload.get("_usage", {}))
                 joined = " (continues)" if new[0].get("continues_previous") else ""
                 extra = f", {len(new)} entries" if len(new) > 1 else ""
-                print(f"ok{joined}{extra}  [{time.time() - started:.0f}s]")
+                took = ("already read by an interrupted run" if reused
+                        else f"{time.time() - started:.0f}s")
+                print(f"ok{joined}{extra}  [{took}]")
 
-            total_cost += file_cost
             if not segments:
                 results.append({"src": path.name, "out": "-", "date": "-",
                                 "status": "FAILED", "note": "no page transcribed"})
                 print()
+                if stopped_early:
+                    break
                 continue
+
+            if args.force:
+                aside = set_aside_old_notes(out_dir, md_dir, img_dir, path.name,
+                                            set(ok_pages), run_stamp)
+                if aside:
+                    print(f"      ({aside} earlier note(s) moved to "
+                          f"{REPLACED_SUBDIR}/{run_stamp}/)")
 
             enforce_date_boundaries(segments)
             written = []
@@ -1227,15 +1453,19 @@ def main() -> int:
             previous = {} if args.force else manifest.get(key, {})
             save_manifest(out_dir, {key: {
                 "original": path.name,
+                "size": path.stat().st_size,
                 "pages_total": item["total"],
-                "pages_done": sorted(set(previous.get("pages_done", []))
-                                     | ({p for p, _ in rendered} - set(failed_pages))),
+                "pages_done": sorted(set(previous.get("pages_done", [])) | set(ok_pages)),
                 "notes": previous.get("notes", []) + written,
                 "processed_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
                 "usage": usage,
                 "cost_usd": round(previous.get("cost_usd", 0.0) + file_cost, 6),
             }})
+            # The notes exist now, so the saved pages have done their job.
+            clear_cached_pages(key)
             print()
+            if stopped_early:
+                break
 
     print("=" * 78)
     w = max([len(r["src"]) for r in results] + [len(n) for n, _ in skipped] + [8])
@@ -1256,6 +1486,12 @@ def main() -> int:
     print(f"{ok} note(s) written, {len(review)} flagged for review, "
           f"{blank} blank page(s) skipped, {failed} failed, {len(skipped)} skipped"
           + (f"  (~${total_cost:.2f} of subscription usage)" if total_cost else ""))
+    if stopped_early:
+        print()
+        print(f"Stopped early: {MAX_CONSECUTIVE_FAILURES} pages in a row failed, which "
+              "points at the connection, the login or\nthe rate limit rather than the "
+              "pages. Nothing is lost - run again later and it carries on\nfrom the "
+              "first page without a note.")
     if review:
         print()
         print("Flagged for manual review - no text, but not blank either "
@@ -1272,6 +1508,7 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except KeyboardInterrupt:
-        print("\nInterrupted. Notes already written are safe; the file in progress "
-              "resumes from its first uncovered page next run.")
+        print("\nInterrupted. Notes already written are safe, and the pages already "
+              "read from the file\nin progress are saved: the next run reuses them "
+              "and carries on from where this one stopped.")
         sys.exit(130)
