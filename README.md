@@ -266,8 +266,10 @@ set in the environment.
   new explicit date appears, the note before it is closed, no matter what the
   model thought was continuing. Undated pages, and repeats of the same date,
   still merge as usual.
-- **No translation.** Pages are transcribed in the language written. Slugs and
-  tags are always English, so one vocabulary covers the whole archive.
+- **No translation.** Pages are transcribed in the language written. Titles,
+  slugs and tags are always English, so one vocabulary covers the whole archive
+  — a German page gets an English heading above its German text, and a heading
+  written on the page in another language is translated.
 - **Tags are fed back.** Existing tags from the output folder are passed to the
   model with instructions to reuse them, so the corpus clusters instead of
   drifting between `ai-prompting` and `ai-prompts`.

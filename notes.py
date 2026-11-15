@@ -513,7 +513,8 @@ SCHEMA = {
 SYSTEM_PROMPT = (
     "You transcribe photographed handwritten notes. Read the image with the Read tool, "
     "then return the structured result and nothing else. "
-    "Transcribe in the language written; never translate. "
+    "Transcribe in the language written; never translate the transcription. "
+    "The one exception is the title field, which is always in English. "
     "Preserve the structure of the page: headings, bullets, indentation, emphasis. "
     "Mark words you cannot read confidently as [?bestguess]. "
     "Never summarise, interpret, comment on, or add anything that is not on the page."
@@ -599,8 +600,10 @@ divider itself as *** on a line of its own. When in doubt, do not split.
 Return these fields for every segment:
 
 {continues_rule}title
-  A short title for the entry. If it has its own heading, use it verbatim.
-  If it does not, write a brief descriptive one in the entry's own language.
+  A short title for the entry, always in ENGLISH. If it has its own heading in
+  English, use it verbatim; if the heading is in another language, translate
+  it. If it has no heading, write a brief descriptive English one.
+  The title is the only thing translated - the transcription never is.
   For a continuation, repeat the previous page's title.
 
 markdown
